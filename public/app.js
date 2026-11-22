@@ -1,14 +1,26 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS } from './ice.js';
 
-const APP_VERSION = '1.4.4';
+const APP_VERSION = '1.5.0';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
+const RANGES = [['today', 'Today'], ['yesterday', 'Yesterday'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last year'], ['0', 'All time']];
+const DAY = 86400e3;
+/** [from, to) in ms for the chosen range. Today and yesterday are EVE (UTC) days. */
+function rangeBounds(r = state.range) {
+  const midnight = Math.floor(Date.now() / DAY) * DAY;
+  if (r === 'today') return [midnight, Infinity];
+  if (r === 'yesterday') return [midnight - DAY, midnight];
+  if (r === '0') return [0, Infinity];
+  return [Date.now() - Number(r) * DAY, Infinity];
+}
+const inRange = t => { const [a, b] = rangeBounds(); return t >= a && t < b; };
+/** Entries in the chosen range (state.events always holds at least the last 30 days, for the tiles). */
+const viewEvents = () => state.events.filter(e => inRange(e.t));
 
 const state = {
   me: null, prices: {}, pricesUpdated: null, events: [], totals: [], systems: {}, times: [], allEvents: null, hq: '',
-  tab: 'sessions', range: 30, open: new Set(),
+  tab: 'sessions', range: '30', open: new Set(),
 };
 
 // ---------------------------------------------------------------- formatting
@@ -169,7 +181,7 @@ async function loadSystems(ids) {
 
 async function loadData() {
   status('Loading…', true);
-  const from = state.range ? Date.now() - state.range * 86400e3 : 1;
+  const from = state.range === '0' ? 1 : Math.min(rangeBounds()[0], Date.now() - 31 * DAY);
   const [ev, tot, pr, times] = await Promise.all([api(`/api/events?from=${from}`), api('/api/totals'), api('/api/prices'), api('/api/session-times')]);
   state.events = ev; state.totals = tot; state.prices = pr.prices; state.pricesUpdated = pr.updated; state.times = times;
   state.allEvents = null; // History reloads everything next time it's shown
@@ -182,7 +194,7 @@ async function loadData() {
 async function loadHistory() {
   if (state.allEvents) return;
   status('Loading history…', true);
-  state.allEvents = state.range === 0 ? state.events : await api('/api/events?from=1');
+  state.allEvents = state.range === '0' ? state.events : await api('/api/events?from=1');
   await loadSystems(state.allEvents.map(e => e.s));
   status('');
 }
@@ -274,7 +286,7 @@ function breakdown(rows) {
 function tiles() {
   const now = Date.now(), today = evedate(now);
   const all = sumValue(state.totals);
-  const inRange = days => sumValue(state.events.filter(e => e.d >= evedate(now - (days - 1) * 86400e3)));
+  const lastDays = days => sumValue(state.events.filter(e => e.d >= evedate(now - (days - 1) * 86400e3)));
   const t = sumValue(state.events.filter(e => e.d === today));
   const sess = buildSessions(state.events)[0];
   const rate = sess && sess.ms > 0 ? perHr(sess.r.v, sess.ms) : null;
@@ -282,8 +294,8 @@ function tiles() {
   const none = { v: 0, bb: bbs().map(() => 0), best: 0 };
   return `<div class="tiles">
     ${tile('Today (EVE time)', t)}
-    ${state.range === 0 || state.range >= 7 ? tile('Last 7 days', inRange(7)) : ''}
-    ${state.range === 0 || state.range >= 30 ? tile('Last 30 days', inRange(30)) : ''}
+    ${tile('Last 7 days', lastDays(7))}
+    ${tile('Last 30 days', lastDays(30))}
     ${tile('All time', all, `${num(state.totals.reduce((n, r) => n + r.q, 0))} units`)}
     ${tile(sess?.active ? 'This session' : 'Last session', sess ?? none, sess ? `${isk(rate)} ISK/hr · ${dur(sess.ms)}${sess.active ? ' · <em>active</em>' : ''}` : 'none yet', sess?.ms)}
   </div>`;
@@ -298,15 +310,19 @@ function priceLine() {
 }
 
 function rangePicker() {
-  return `<label class="field">Show <select id="range">${Object.entries(RANGES).sort((a, b) => (+a[0] || 1e9) - (+b[0] || 1e9))
-    .map(([k, v]) => `<option value="${k}"${+k === state.range ? ' selected' : ''}>${v}</option>`).join('')}</select></label>`;
+  return `<label class="field">Show <select id="range">${RANGES.map(([k, v]) => `<option value="${k}"${k === state.range ? ' selected' : ''}>${v}</option>`).join('')}</select></label>`;
 }
 
 function viewSessions() {
-  const sessions = buildSessions(state.events);
-  const approx = state.events.filter(e => e.a && !e._in); // buildSessions has just marked the ones it took
+  // Sessions are built from everything loaded (so one crossing midnight stays whole), then the range picks which show.
+  const [from, to] = rangeBounds();
+  const sessions = buildSessions(state.events).filter(s => s.last >= from && s.start < to);
+  const approx = state.events.filter(e => e.a && !e._in && inRange(e.t)); // buildSessions has just marked the ones it took
   const toolbar = `<div class="toolbar">${rangePicker()}<span class="grow"></span>
     <button id="pollNow">Check ESI now</button><button id="csv">Export CSV</button></div>`;
+  if (!sessions.length && !approx.length && state.totals.length) {
+    return `${tiles()}${toolbar}<div class="empty"><p>No mining ${state.range === 'today' ? 'today' : state.range === 'yesterday' ? 'yesterday' : 'in this range'} (EVE time).</p></div>${priceLine()}`;
+  }
   if (!sessions.length && !approx.length) {
     return `${tiles()}${toolbar}<div class="empty"><h3>No ice yet</h3><p>MiningLedger checks each character's mining ledger every ${POLL_MINUTES} minutes. Ice shows up here once EVE publishes it, usually 10 to 20 minutes after it's mined.</p></div>${priceLine()}`;
   }
@@ -393,7 +409,7 @@ function download(name, rows) {
 
 function viewDays() {
   const byDay = new Map();
-  for (const e of state.events) { if (!byDay.has(e.d)) byDay.set(e.d, []); byDay.get(e.d).push(e); }
+  for (const e of viewEvents()) { if (!byDay.has(e.d)) byDay.set(e.d, []); byDay.get(e.d).push(e); }
   const days = [...byDay].sort((a, b) => b[0].localeCompare(a[0])).map(([d, r]) => ({ d, r, ...sumValue(r), units: r.reduce((n, e) => n + e.q, 0) }));
   const max = Math.max(1, ...days.map(d => d.v));
   let running = days.reduce((n, d) => n + d.v, 0);
@@ -519,7 +535,7 @@ function exportCsv() {
   const ids = new Map();
   for (const ss of buildSessions(state.events)) for (const r of ss.rows) ids.set(r, ss.id);
   const head = ['session_id', 'eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...bbs().map(col), 'time_known'];
-  const lines = [...state.events].sort((a, b) => a.t - b.t).map(e => {
+  const lines = viewEvents().sort((a, b) => a.t - b.t).map(e => {
     const v = value(e.y, e.q), p = state.prices[ICE[e.y].value];
     const unit = p ? (s.price_source === 'Jita Sell' ? p.sell : p.buy) : '';
     return [ids.get(e) || '', e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...bbs().map(b => accepted(b, e.y) ? (bbValue(b, e.y, e.q) ?? 0).toFixed(2) : 'not accepted'), e.a ? 'day only' : 'yes'];
@@ -579,7 +595,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', async e => {
   if (e.target.name === 'bb_method') { state.draftBuybacks = readBuybacks(); render(); return; }
-  if (e.target.id === 'range') { state.range = Number(e.target.value); await loadData().catch(err => toast(err.message, true)); render(); }
+  if (e.target.id === 'range') { state.range = e.target.value; await loadData().catch(err => toast(err.message, true)); render(); }
 });
 document.addEventListener('submit', async e => {
   if (e.target.id !== 'settings') return;
