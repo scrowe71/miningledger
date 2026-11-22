@@ -13,7 +13,7 @@ run_worker_first = ["/api/*", "/auth/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "miningledger"
-database_id = "PASTE_D1_DATABASE_ID_HERE"
+database_id = "9de6ad2c-5179-4574-a612-b314384818a1"
 
 # Every 10 minutes: read mining ledgers. At 5 past each hour: refresh Jita ice prices.
 [triggers]
@@ -23,7 +23,7 @@ crons = ["*/10 * * * *", "5 * * * *"]
 # Client ID of the EVE application (developers.eveonline.com). Public value, safe to commit.
 # Callback URL there: https://miningledger.crankyape.space/auth/callback
 # Scope there: esi-industry.read_character_mining.v1
-EVE_CLIENT_ID = "PASTE_EVE_CLIENT_ID_HERE"
+EVE_CLIENT_ID = "dab563b12e38463d931d76d509e84747"
 
 # Secret (not in this file): TOKEN_KEY, a long random string used to encrypt EVE refresh tokens.
 # Settings > Variables and Secrets > Add > Secret.
