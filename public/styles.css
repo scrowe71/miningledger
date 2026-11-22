@@ -168,3 +168,5 @@ fieldset.bbset legend label { display: flex; gap: 6px; align-items: center; }
 .rc:not(:nth-child(2)) b { color: var(--accent); }
 .grid.hist td.bbv { white-space: nowrap; }
 .rc.best b { color: var(--good); }
+.rates-head em { font-style: normal; text-transform: none; letter-spacing: 0; font-size: 12px; }
+sup { color: var(--accent); font-size: 10px; }

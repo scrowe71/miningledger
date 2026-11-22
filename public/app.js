@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES } from './ice.js';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -101,10 +101,10 @@ const hrTag = (x, ms) => ms > 0 ? ` · ${isk(perHr(x, ms))}/hr` : '';
 const showBest = sv => bbs().length > 1 && sv.best > Math.max(...sv.bb) + 1;
 /** Lines for a tile: one per buyback, plus the best split when there's more than one. Pass ms to add ISK/hr. */
 function bbLines(sv, ms = 0) {
-  const list = bbs();
+  const list = bbs(), r = sv.r || sv;
   if (!list.length) return '';
-  const lines = list.map((b, i) => `<i class="bb">${bbNote(sv, i)}${hrTag(sv.bb[i], ms)}</i>`);
-  if (showBest(sv)) lines.push(`<i class="bb best" title="Each ice type sold to whichever buyback pays most for it">Best split ${isk(sv.best)}${diffPct(sv.best, sv.v)}${hrTag(sv.best, ms)}</i>`);
+  const lines = list.map((b, i) => `<i class="bb">${bbNote(sv, i)}${hrTag(r.bb[i], ms)}</i>`);
+  if (showBest(sv)) lines.push(`<i class="bb best" title="Each ice type sold to whichever buyback pays most for it">Best split ${isk(sv.best)}${diffPct(sv.best, sv.v)}${hrTag(r.best, ms)}</i>`);
   return lines.join('');
 }
 /**
@@ -114,12 +114,13 @@ function bbLines(sv, ms = 0) {
 function rateStrip(s) {
   if (!(s.ms > 0)) return '';
   const n = s.chars.length;
-  const items = [['Your value', s.v, ''], ...bbs().map((b, i) => [b.short, s.bb[i], b.name]), ...(showBest(s) ? [['Best split', s.best, 'Each ice type sold to whichever buyback pays most for it']] : [])];
-  return `<div class="rates"><div class="rates-head">ISK/hr over ${dur(s.ms)} with ${n} character${n === 1 ? '' : 's'}</div>${items.map(([label, x, title]) =>
+  const r = s.r || s;
+  const items = [['Your value', r.v, ''], ...bbs().map((b, i) => [b.short, r.bb[i], b.name]), ...(showBest(r) ? [['Best split', r.best, 'Each ice type sold to whichever buyback pays most for it']] : [])];
+  return `<div class="rates"><div class="rates-head">ISK/hr over ${dur(s.ms)} with ${n} character${n === 1 ? '' : 's'}${s.pre ? ` <em>· not counting ${num(s.pre)} units mined earlier today before tracking started (they're in the totals, but EVE gives no time for them)</em>` : ''}</div>${items.map(([label, x, title]) =>
     `<div class="rc${label === 'Best split' ? ' best' : ''}" title="${esc(title)}"><span>${esc(label)}</span><b>${isk(perHr(x, s.ms))}<small>/hr</small></b>${n > 1 ? `<i>${isk(perHr(x, s.ms) / n)}/hr per character</i>` : ''}</div>`).join('')}</div>`;
 }
 const bbHeads = (tag = 'th') => bbs().map(b => `<${tag} class="r" title="${esc(b.name)}">${esc(b.short)}</${tag}>`).join('');
-const bbTds = (sv, ms = 0) => bbs().map((b, i) => `<td class="r bbv">${bbNote(sv, i, { short: false })}${ms > 0 ? `<small>${isk(perHr(sv.bb[i], ms))}/hr</small>` : ''}</td>`).join('');
+const bbTds = (sv, ms = 0) => bbs().map((b, i) => `<td class="r bbv">${bbNote(sv, i, { short: false })}${ms > 0 ? `<small>${isk(perHr((sv.r || sv).bb[i], ms))}/hr</small>` : ''}</td>`).join('');
 /** Shared session columns, plus one per buyback. */
 const colsStyle = () => {
   const n = bbs().length;
@@ -224,11 +225,23 @@ function buildSessions(events) {
     s.end = s.last;
     s.ms = s.end - s.start;
     s.active = Date.now() - s.last < gap;
+    s.id = idFor(s.first);
+    s.pre = 0;
+  }
+  // A character added mid-session has that day's earlier mining in its 30-day history, which EVE gives as a
+  // day total with no time. Put it in the session the character was mining in that day, so the session holds
+  // everything mined, but keep it out of ISK/hr: there's no telling how long it took.
+  for (const e of events) e._in = false;
+  for (const e of events.filter(x => x.a)) {
+    const s = out.find(ss => ss.rows.some(r => r.c === e.c && r.d === e.d));
+    if (s) { s.rows.push(e); s.pre += e.q; e._in = true; }
+  }
+  for (const s of out) {
     s.units = s.rows.reduce((n, r) => n + r.q, 0);
     Object.assign(s, sumValue(s.rows));
+    s.r = s.pre ? sumValue(s.rows.filter(r => !r.a)) : sumValue(s.rows); // what ISK/hr is worked out from
     s.chars = [...new Set(s.rows.map(r => r.c))];
     s.systems = [...new Set(s.rows.map(r => r.s))];
-    s.id = idFor(s.first);
   }
   return out.reverse();
 }
@@ -255,7 +268,7 @@ function tiles() {
   const inRange = days => sumValue(state.events.filter(e => e.d >= evedate(now - (days - 1) * 86400e3)));
   const t = sumValue(state.events.filter(e => e.d === today));
   const sess = buildSessions(state.events)[0];
-  const rate = sess && sess.ms > 0 ? sess.v / (sess.ms / 3600e3) : null;
+  const rate = sess && sess.ms > 0 ? perHr(sess.r.v, sess.ms) : null;
   const tile = (label, sv, sub = '', ms = 0) => `<div class="tile"><span>${label}</span><b>${isk(sv.v)}</b>${sub ? `<i>${sub}</i>` : ''}${bbLines(sv, ms)}</div>`;
   const none = { v: 0, bb: bbs().map(() => 0), best: 0 };
   return `<div class="tiles">
@@ -281,7 +294,7 @@ function rangePicker() {
 
 function viewSessions() {
   const sessions = buildSessions(state.events);
-  const approx = state.events.filter(e => e.a);
+  const approx = state.events.filter(e => e.a && !e._in); // buildSessions has just marked the ones it took
   const toolbar = `<div class="toolbar">${rangePicker()}<span class="grow"></span>
     <button id="pollNow">Check ESI now</button><button id="csv">Export CSV</button></div>`;
   if (!sessions.length && !approx.length) {
@@ -290,20 +303,20 @@ function viewSessions() {
   const bb = showBB(), cs = colsStyle();
   const who = ids => `${ids.slice(0, 6).map(c => portrait(c, 22)).join('')}${ids.length > 6 ? `<i>+${ids.length - 6}</i>` : ''}`;
   // One row layout for sessions, earlier days and the column header, so everything lines up.
-  const row = ({ key, open, active, id, time, len, chars, systems, units, rate, sv, approx = false, ms = 0 }) => `
+  const row = ({ key, open, active, id, time, len, chars, systems, units, rate, sv, approx = false, ms = 0, pre = 0 }) => `
     <div class="sess${active ? ' active' : ''}${open ? ' open' : ''}" data-key="${key}">
       <button class="sess-head cols${approx ? ' approx' : ''}" ${cs} aria-expanded="${open}">
         <span class="c-id">${id}</span><span class="c-time">${time}</span><span class="c-len">${len}</span>
         <span class="c-who">${who(chars)}</span><span class="c-sys">${esc(systems.map(sysName).join(', '))}</span>
-        <span class="c-units">${num(units)}</span><span class="c-rate">${rate == null ? '' : isk(rate)}</span>
-        <span class="c-val">${isk(sv.v)}${sv.missing ? '*' : ''}</span>${bbs().map((b, i) => `<span class="c-bb" data-l="${esc(b.short)}">${bbNote(sv, i, { short: false })}${ms > 0 ? `<small>${isk(perHr(sv.bb[i], ms))}/hr</small>` : ''}</span>`).join('')}
+        <span class="c-units"${pre ? ` title="Includes ${num(pre)} units mined earlier that day, before tracking started"` : ''}>${num(units)}${pre ? '<sup>+</sup>' : ''}</span><span class="c-rate">${rate == null ? '' : isk(rate)}</span>
+        <span class="c-val">${isk(sv.v)}${sv.missing ? '*' : ''}</span>${bbs().map((b, i) => `<span class="c-bb" data-l="${esc(b.short)}">${bbNote(sv, i, { short: false })}${ms > 0 ? `<small>${isk(perHr((sv.r || sv).bb[i], ms))}/hr</small>` : ''}</span>`).join('')}
       </button>
       ${open ? `<div class="sess-body">${approx ? '' : rateStrip(sv)}${breakdown(sv.rows)}</div>` : ''}
     </div>`;
   const rows = sessions.map(s => row({
     key: String(s.first), open: state.open.has(String(s.first)), active: s.active,
     id: `<b class="sid">${s.id}</b>`, time: `${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)}`, len: dur(s.ms),
-    chars: s.chars, systems: s.systems, units: s.units, rate: s.ms > 0 ? s.v / (s.ms / 3600e3) : null, sv: s, ms: s.ms,
+    chars: s.chars, systems: s.systems, units: s.units, rate: perHr(s.r.v, s.ms), sv: s, ms: s.ms, pre: s.pre,
   })).join('');
   const header = (first = 'Session ID', time = 'EVE time') => `<div class="cols colhead" ${cs}><span class="c-id">${first}</span><span class="c-time">${time}</span><span class="c-len">Length</span><span class="c-who">Characters</span><span class="c-sys">Systems</span><span class="c-units">Units</span><span class="c-rate">ISK/hr</span><span class="c-val">Your value</span>${bbs().map(b => `<span class="c-bb" title="${esc(b.name)}">${esc(b.short)}</span>`).join('')}</div>`;
   const approxDays = [...new Set(approx.map(e => e.d))].sort().reverse();
@@ -323,15 +336,16 @@ function viewHistory() {
   const list = q ? all.filter(s => [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q))) : all;
   const bb = showBB();
   const hours = list.reduce((n, s) => n + s.ms, 0) / 3600e3;
-  const tot = { v: list.reduce((n, s) => n + s.v, 0), bb: bbs().map((b, i) => list.reduce((n, s) => n + s.bb[i], 0)), best: list.reduce((n, s) => n + s.best, 0) };
+  const add = get => ({ v: list.reduce((n, s) => n + get(s).v, 0), bb: bbs().map((b, i) => list.reduce((n, s) => n + get(s).bb[i], 0)), best: list.reduce((n, s) => n + get(s).best, 0) });
+  const tot = add(s => s), timedTot = add(s => s.r);
   const rows = list.map(s => {
-    const open = state.open.has(`h${s.first}`), rate = s.ms > 0 ? s.v / (s.ms / 3600e3) : null;
+    const open = state.open.has(`h${s.first}`), rate = perHr(s.r.v, s.ms);
     return `<tr class="hrow${open ? ' open' : ''}${s.active ? ' active' : ''}" data-hkey="h${s.first}">
       <td><b class="sid">${s.id}</b>${s.active ? ' <span class="live">active</span>' : ''}</td>
       <td class="nowrap">${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)}</td><td class="nowrap">${dur(s.ms)}</td>
       <td class="who">${s.chars.slice(0, 6).map(c => portrait(c, 20)).join('')}${s.chars.length > 6 ? ` +${s.chars.length - 6}` : ''} <span class="dim">${s.chars.length}</span></td>
       <td class="dim ell">${esc(s.systems.map(sysName).join(', '))}</td>
-      <td class="r">${num(s.units)}</td><td class="r dim">${isk(rate)}</td><td class="r val">${isk(s.v)}${s.missing ? '*' : ''}</td>
+      <td class="r"${s.pre ? ` title="Includes ${num(s.pre)} units mined earlier that day, before tracking started"` : ''}>${num(s.units)}${s.pre ? '<sup>+</sup>' : ''}</td><td class="r dim">${isk(rate)}</td><td class="r val">${isk(s.v)}${s.missing ? '*' : ''}</td>
       ${bbTds(s, s.ms)}</tr>
       ${open ? `<tr class="hbody"><td colspan="${8 + bbs().length}">${rateStrip(s)}${breakdown(s.rows)}</td></tr>` : ''}`;
   }).join('');
@@ -339,7 +353,7 @@ function viewHistory() {
     <div class="tiles">
       <div class="tile"><span>Sessions</span><b>${list.length}</b><i>${hours.toFixed(1)} hours mining</i></div>
       <div class="tile"><span>Total value</span><b>${isk(tot.v)}</b>${bbLines(tot)}</div>
-      <div class="tile"><span>Average ISK/hr</span><b>${isk(hours ? tot.v / hours : null)}</b>${bbs().map((b, i) => `<i class="bb">${esc(b.short)} ${isk(hours ? tot.bb[i] / hours : null)}</i>`).join('')}</div>
+      <div class="tile"><span>Average ISK/hr</span><b>${isk(hours ? timedTot.v / hours : null)}</b>${bbs().map((b, i) => `<i class="bb">${esc(b.short)} ${isk(hours ? timedTot.bb[i] / hours : null)}</i>`).join('')}</div>
     </div>
     ${list.length ? `<div class="scroll"><table class="grid hist"><thead><tr><th>Session ID</th><th>EVE time</th><th>Length</th><th>Characters</th><th>Systems</th><th class="r">Units</th><th class="r">ISK/hr</th><th class="r">Your value</th>${bbHeads()}</tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="empty"><p>${q ? 'No sessions match that search.' : 'No timed sessions yet.'}</p></div>`}
@@ -352,12 +366,12 @@ function exportSessionsCsv() {
   const q = state.hq.trim().toLowerCase();
   const list = buildSessions(state.allEvents || []).filter(s => !q || [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q)));
   const head = ['session_id', 'start_eve', 'end_eve', 'minutes', 'characters', 'systems', 'units', 'isk', 'isk_per_hour', 'isk_per_hour_per_character',
-    ...bbs().flatMap(b => [col(b), col(b).replace(/_isk$/, '_isk_per_hour')]), ...(bbs().length > 1 ? ['best_split_isk', 'best_split_isk_per_hour'] : [])];
+    ...bbs().flatMap(b => [col(b), col(b).replace(/_isk$/, '_isk_per_hour')]), ...(bbs().length > 1 ? ['best_split_isk', 'best_split_isk_per_hour'] : []), 'units_before_tracking'];
   const fmt = ms => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   const fx = x => x == null || !isFinite(x) ? '' : x.toFixed(2);
   const lines = list.reverse().map(s => [s.id, fmt(s.start), s.active ? '' : fmt(s.end), Math.round(s.ms / 60e3), s.chars.map(charName).join('; '), s.systems.map(sysName).join('; '),
-    s.units, s.v.toFixed(2), fx(perHr(s.v, s.ms)), fx(perHr(s.v, s.ms) / s.chars.length),
-    ...s.bb.flatMap(x => [x.toFixed(2), fx(perHr(x, s.ms))]), ...(bbs().length > 1 ? [s.best.toFixed(2), fx(perHr(s.best, s.ms))] : [])]);
+    s.units, s.v.toFixed(2), fx(perHr(s.r.v, s.ms)), fx(perHr(s.r.v, s.ms) / s.chars.length),
+    ...s.bb.flatMap((x, i) => [x.toFixed(2), fx(perHr(s.r.bb[i], s.ms))]), ...(bbs().length > 1 ? [s.best.toFixed(2), fx(perHr(s.r.best, s.ms))] : []), s.pre]);
   download(`miningledger-sessions-${evedate(Date.now())}.csv`, [head, ...lines]);
 }
 function download(name, rows) {
