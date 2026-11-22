@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
-import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES } from './ice.js';
+import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES } from './ice.js';
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -50,39 +50,67 @@ function value(typeId, units) {
   const unit = s.price_source === 'Jita Sell' ? p.sell : p.buy;
   return unit == null ? null : units * unit * s.percentage / 100;
 }
-const cmp = () => state.me.settings.compare;
-/** Refined value of one unit of ice at Jita buy and the buyback's refine yield (before the buyback's percentage). */
-function refinedUnit(typeId) {
+// ---------------------------------------------------------------- buybacks
+const bbs = () => state.me.settings.buybacks.filter(b => b.enabled);
+const showBB = () => bbs().length > 0;
+/** Refined value of one unit of ice: ice products at the buyback's Jita price × its refine yield (before its percentage). */
+function refinedUnit(b, typeId) {
   const mats = MATERIALS[typeId];
   if (!mats) return null;
   let v = 0;
-  for (const [id, n] of Object.entries(mats)) { const p = state.prices[id]?.buy; if (p == null) return null; v += n * p; }
-  return v * cmp().yield / 100;
+  for (const [id, n] of Object.entries(mats)) {
+    const p = state.prices[id]; const x = b.basis === 'Jita Sell' ? p?.sell : p?.buy;
+    if (x == null) return null; v += n * x;
+  }
+  return v * b.yield / 100;
 }
-const accepted = typeId => cmp().accepted.includes(Number(typeId)) && !!MATERIALS[typeId];
-/** What the comparison buyback would pay: 0 for ice it doesn't accept, null if prices are missing. */
-function bbValue(typeId, units) {
-  if (!accepted(typeId)) return 0;
-  const u = refinedUnit(typeId);
-  return u == null ? null : units * u * cmp().percentage / 100;
+const accepted = (b, typeId) => b.accepted.includes(Number(typeId)) && !!MATERIALS[typeId];
+/** What a buyback pays for `units` of a raw ice type: 0 if it doesn't take it, null if prices are missing. */
+function bbValue(b, typeId, units) {
+  if (!accepted(b, typeId)) return 0;
+  const u = refinedUnit(b, typeId);
+  return u == null ? null : units * u * b.percentage / 100;
 }
+/** Your value, each buyback's value, and "best": every entry sold to whichever buyback pays most for it. */
 function sumValue(rows) {
-  let v = 0, bb = 0, missing = false, rejected = 0;
+  const list = bbs();
+  let v = 0, best = 0, missing = false;
+  const bb = list.map(() => 0);
   for (const r of rows) {
     const x = value(r.y, r.q); if (x == null) missing = true; else v += x;
-    const b = bbValue(r.y, r.q); if (b != null) bb += b;
-    if (!accepted(r.y)) rejected += r.q;
+    let top = 0;
+    list.forEach((b, i) => { const y = bbValue(b, r.y, r.q) ?? 0; bb[i] += y; if (y > top) top = y; });
+    best += top;
   }
-  return { v, bb, missing, rejected };
+  return { v, bb, best, missing };
 }
-const showBB = () => cmp().enabled;
-/** "KFBP 52.1m (−12%)": the buyback figure and how it compares with your own value. */
-function bbNote(sv, { short = true } = {}) {
-  if (!showBB()) return '';
-  const d = sv.v > 0 ? (sv.bb - sv.v) / sv.v * 100 : null;
-  const diff = d == null ? '' : ` <span class="${d >= 0 ? 'up' : 'down'}">(${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(0)}%)</span>`;
-  return `${short ? esc(cmp().short) + ' ' : ''}${isk(sv.bb)}${diff}`;
+const diffPct = (x, v) => {
+  if (!(v > 0)) return '';
+  const d = (x - v) / v * 100;
+  return ` <span class="${d >= 0 ? 'up' : 'down'}">(${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(0)}%)</span>`;
+};
+/** Buyback i's figure, compared with your own value; the highest-paying buyback is marked. */
+function bbNote(sv, i, { short = true } = {}) {
+  const list = bbs(), x = sv.bb?.[i] ?? 0;
+  const top = list.length > 1 && x > 0 && x >= Math.max(...sv.bb);
+  return `<span class="${top ? 'top' : ''}">${short ? esc(list[i].short) + ' ' : ''}${isk(x)}${diffPct(x, sv.v)}</span>`;
 }
+/** Lines for a tile: one per buyback, plus the best split when there's more than one. */
+function bbLines(sv) {
+  const list = bbs();
+  if (!list.length) return '';
+  const lines = list.map((b, i) => `<i class="bb">${bbNote(sv, i)}</i>`);
+  if (list.length > 1 && sv.best > Math.max(...sv.bb) + 1) lines.push(`<i class="bb best" title="Each ice type sold to whichever buyback pays most for it">Best split ${isk(sv.best)}${diffPct(sv.best, sv.v)}</i>`);
+  return lines.join('');
+}
+const bbHeads = (tag = 'th') => bbs().map(b => `<${tag} class="r" title="${esc(b.name)}">${esc(b.short)}</${tag}>`).join('');
+const bbTds = sv => bbs().map((b, i) => `<td class="r bbv">${bbNote(sv, i, { short: false })}</td>`).join('');
+/** Shared session columns, plus one per buyback. */
+const colsStyle = () => {
+  const n = bbs().length;
+  return n ? `style="grid-template-columns:134px 92px 56px 72px minmax(60px, 1fr) 52px 60px 86px${' 124px'.repeat(n)};column-gap:12px"`
+    : 'style="grid-template-columns:128px 96px 64px 104px minmax(80px, 1fr) 64px 80px 80px"';
+};
 
 // ---------------------------------------------------------------- api
 async function api(path, opts = {}) {
@@ -197,12 +225,11 @@ function breakdown(rows) {
     const k = `${r.c}|${r.y}`;
     m.set(k, (m.get(k) || 0) + r.q);
   }
-  const lines = [...m].map(([k, q]) => { const [c, y] = k.split('|').map(Number); return { c, y, q, v: value(y, q), b: bbValue(y, q) }; })
+  const lines = [...m].map(([k, q]) => { const [c, y] = k.split('|').map(Number); return { c, y, q, ...sumValue([{ y, q }]) }; })
     .sort((a, b) => charName(a.c).localeCompare(charName(b.c)) || (b.v ?? 0) - (a.v ?? 0));
-  const bb = showBB();
-  return `<table class="grid"><thead><tr><th>Character</th><th>Ice</th><th class="r">Units</th><th class="r">ISK</th>${bb ? `<th class="r">${esc(cmp().short)}</th>` : ''}</tr></thead><tbody>${
+  return `<table class="grid"><thead><tr><th>Character</th><th>Ice</th><th class="r">Units</th><th class="r">ISK</th>${bbHeads()}</tr></thead><tbody>${
     lines.map(l => `<tr><td>${portrait(l.c, 20)} ${esc(charName(l.c))}</td><td>${typeIcon(l.y)} ${esc(ICE[l.y].name)}</td><td class="r">${num(l.q)}</td><td class="r">${isk(l.v)}</td>${
-      bb ? `<td class="r">${accepted(l.y) ? isk(l.b) : '<span class="na">not accepted</span>'}</td>` : ''}</tr>`).join('')
+      bbs().map((b, i) => `<td class="r bbv">${accepted(b, l.y) ? bbNote(l, i, { short: false }) : '<span class="na">not accepted</span>'}</td>`).join('')}</tr>`).join('')
   }</tbody></table>`;
 }
 
@@ -214,8 +241,8 @@ function tiles() {
   const t = sumValue(state.events.filter(e => e.d === today));
   const sess = buildSessions(state.events)[0];
   const rate = sess && sess.ms > 0 ? sess.v / (sess.ms / 3600e3) : null;
-  const tile = (label, sv, sub = '') => `<div class="tile"><span>${label}</span><b>${isk(sv.v)}</b>${sub ? `<i>${sub}</i>` : ''}${showBB() ? `<i class="bb">${bbNote(sv)}</i>` : ''}</div>`;
-  const none = { v: 0, bb: 0 };
+  const tile = (label, sv, sub = '') => `<div class="tile"><span>${label}</span><b>${isk(sv.v)}</b>${sub ? `<i>${sub}</i>` : ''}${bbLines(sv)}</div>`;
+  const none = { v: 0, bb: bbs().map(() => 0), best: 0 };
   return `<div class="tiles">
     ${tile('Today (EVE time)', t)}
     ${state.range === 0 || state.range >= 7 ? tile('Last 7 days', inRange(7)) : ''}
@@ -228,8 +255,7 @@ function tiles() {
 function priceLine() {
   const s = state.me.settings;
   const when = state.pricesUpdated ? ago(state.pricesUpdated) : 'not yet loaded';
-  const c = s.compare;
-  const bb = c.enabled ? ` Compared with <b>${esc(c.name)}</b> (${esc(c.short)}): ${c.percentage}% of refined value at Jita buy, ${c.yield}% refine yield; ice it doesn't accept counts as 0.` : '';
+  const bb = showBB() ? ` Buybacks: ${bbs().map(b => `<b title="${esc(b.name)}">${esc(b.short)}</b> ${b.percentage}% of refined value at ${esc(b.basis)} (${b.yield}% yield)`).join(', ')}; ice a buyback doesn't take counts as 0 for it.` : '';
   return `<p class="hint">Valued as compressed ice at <b>${esc(s.price_source)}</b> × <b>${s.percentage}%</b>, using today's price for every day (prices updated ${when}).${bb} <a href="#" data-go="settings">Change</a></p>`;
 }
 
@@ -246,16 +272,16 @@ function viewSessions() {
   if (!sessions.length && !approx.length) {
     return `${tiles()}${toolbar}<div class="empty"><h3>No ice yet</h3><p>MiningLedger checks each character's mining ledger every ${POLL_MINUTES} minutes. Ice shows up here once EVE publishes it, usually 10 to 20 minutes after it's mined.</p></div>${priceLine()}`;
   }
-  const bb = showBB();
+  const bb = showBB(), cs = colsStyle();
   const who = ids => `${ids.slice(0, 6).map(c => portrait(c, 22)).join('')}${ids.length > 6 ? `<i>+${ids.length - 6}</i>` : ''}`;
   // One row layout for sessions, earlier days and the column header, so everything lines up.
   const row = ({ key, open, active, id, time, len, chars, systems, units, rate, sv, approx = false }) => `
     <div class="sess${active ? ' active' : ''}${open ? ' open' : ''}" data-key="${key}">
-      <button class="sess-head cols${approx ? ' approx' : ''}" aria-expanded="${open}">
+      <button class="sess-head cols${approx ? ' approx' : ''}" ${cs} aria-expanded="${open}">
         <span class="c-id">${id}</span><span class="c-time">${time}</span><span class="c-len">${len}</span>
         <span class="c-who">${who(chars)}</span><span class="c-sys">${esc(systems.map(sysName).join(', '))}</span>
         <span class="c-units">${num(units)}</span><span class="c-rate">${rate == null ? '' : isk(rate)}</span>
-        <span class="c-val">${isk(sv.v)}${sv.missing ? '*' : ''}</span>${bb ? `<span class="c-bb">${bbNote(sv, { short: false })}</span>` : ''}
+        <span class="c-val">${isk(sv.v)}${sv.missing ? '*' : ''}</span>${bbs().map((b, i) => `<span class="c-bb" data-l="${esc(b.short)}">${bbNote(sv, i, { short: false })}</span>`).join('')}
       </button>
       ${open ? `<div class="sess-body">${breakdown(sv.rows)}</div>` : ''}
     </div>`;
@@ -264,7 +290,7 @@ function viewSessions() {
     id: `<b class="sid">${s.id}</b>`, time: `${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)}`, len: dur(s.ms),
     chars: s.chars, systems: s.systems, units: s.units, rate: s.ms > 0 ? s.v / (s.ms / 3600e3) : null, sv: s,
   })).join('');
-  const header = (first = 'Session ID', time = 'EVE time') => `<div class="cols colhead"><span class="c-id">${first}</span><span class="c-time">${time}</span><span class="c-len">Length</span><span class="c-who">Characters</span><span class="c-sys">Systems</span><span class="c-units">Units</span><span class="c-rate">ISK/hr</span><span class="c-val">Your value</span>${bb ? `<span class="c-bb">${esc(cmp().short)}</span>` : ''}</div>`;
+  const header = (first = 'Session ID', time = 'EVE time') => `<div class="cols colhead" ${cs}><span class="c-id">${first}</span><span class="c-time">${time}</span><span class="c-len">Length</span><span class="c-who">Characters</span><span class="c-sys">Systems</span><span class="c-units">Units</span><span class="c-rate">ISK/hr</span><span class="c-val">Your value</span>${bbs().map(b => `<span class="c-bb" title="${esc(b.name)}">${esc(b.short)}</span>`).join('')}</div>`;
   const approxDays = [...new Set(approx.map(e => e.d))].sort().reverse();
   const earlier = approx.length ? `<h3 class="sub">Before tracking started</h3>
     <p class="hint">Mining from the 30 days of history EVE had when each character was added. EVE only gives daily totals for these, so there's no session time or ISK/hr.</p>
@@ -282,7 +308,7 @@ function viewHistory() {
   const list = q ? all.filter(s => [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q))) : all;
   const bb = showBB();
   const hours = list.reduce((n, s) => n + s.ms, 0) / 3600e3;
-  const tot = { v: list.reduce((n, s) => n + s.v, 0), bb: list.reduce((n, s) => n + s.bb, 0) };
+  const tot = { v: list.reduce((n, s) => n + s.v, 0), bb: bbs().map((b, i) => list.reduce((n, s) => n + s.bb[i], 0)), best: list.reduce((n, s) => n + s.best, 0) };
   const rows = list.map(s => {
     const open = state.open.has(`h${s.first}`), rate = s.ms > 0 ? s.v / (s.ms / 3600e3) : null;
     return `<tr class="hrow${open ? ' open' : ''}${s.active ? ' active' : ''}" data-hkey="h${s.first}">
@@ -291,29 +317,29 @@ function viewHistory() {
       <td class="who">${s.chars.slice(0, 6).map(c => portrait(c, 20)).join('')}${s.chars.length > 6 ? ` +${s.chars.length - 6}` : ''} <span class="dim">${s.chars.length}</span></td>
       <td class="dim ell">${esc(s.systems.map(sysName).join(', '))}</td>
       <td class="r">${num(s.units)}</td><td class="r dim">${isk(rate)}</td><td class="r val">${isk(s.v)}${s.missing ? '*' : ''}</td>
-      ${bb ? `<td class="r bbv">${bbNote(s, { short: false })}</td>` : ''}</tr>
-      ${open ? `<tr class="hbody"><td colspan="${bb ? 9 : 8}">${breakdown(s.rows)}</td></tr>` : ''}`;
+      ${bbTds(s)}</tr>
+      ${open ? `<tr class="hbody"><td colspan="${8 + bbs().length}">${breakdown(s.rows)}</td></tr>` : ''}`;
   }).join('');
   return `<div class="toolbar"><input type="search" id="hq" placeholder="Search by session ID, date, character or system" value="${esc(state.hq)}"><span class="grow"></span><button id="hcsv">Export sessions CSV</button></div>
     <div class="tiles">
       <div class="tile"><span>Sessions</span><b>${list.length}</b><i>${hours.toFixed(1)} hours mining</i></div>
-      <div class="tile"><span>Total value</span><b>${isk(tot.v)}</b>${bb ? `<i class="bb">${bbNote(tot)}</i>` : ''}</div>
-      <div class="tile"><span>Average ISK/hr</span><b>${isk(hours ? tot.v / hours : null)}</b>${bb ? `<i class="bb">${esc(cmp().short)} ${isk(hours ? tot.bb / hours : null)}</i>` : ''}</div>
+      <div class="tile"><span>Total value</span><b>${isk(tot.v)}</b>${bbLines(tot)}</div>
+      <div class="tile"><span>Average ISK/hr</span><b>${isk(hours ? tot.v / hours : null)}</b>${bbs().map((b, i) => `<i class="bb">${esc(b.short)} ${isk(hours ? tot.bb[i] / hours : null)}</i>`).join('')}</div>
     </div>
-    ${list.length ? `<div class="scroll"><table class="grid hist"><thead><tr><th>Session ID</th><th>EVE time</th><th>Length</th><th>Characters</th><th>Systems</th><th class="r">Units</th><th class="r">ISK/hr</th><th class="r">Your value</th>${bb ? `<th class="r">${esc(cmp().short)}</th>` : ''}</tr></thead><tbody>${rows}</tbody></table></div>`
+    ${list.length ? `<div class="scroll"><table class="grid hist"><thead><tr><th>Session ID</th><th>EVE time</th><th>Length</th><th>Characters</th><th>Systems</th><th class="r">Units</th><th class="r">ISK/hr</th><th class="r">Your value</th>${bbHeads()}</tr></thead><tbody>${rows}</tbody></table></div>`
       : `<div class="empty"><p>${q ? 'No sessions match that search.' : 'No timed sessions yet.'}</p></div>`}
     <p class="hint">Session IDs are the EVE (UTC) date a session started plus its number that day, e.g. 22NOV2026-S01. They're worked out from your mining entries, so they stay the same as long as the session gap setting (${state.me.settings.session_gap_minutes} min) isn't changed. Mining from before tracking started has no times, so it isn't in this list.</p>
     ${priceLine()}`;
 }
 
 function exportSessionsCsv() {
-  const bbOn = showBB(), short = cmp().short.replace(/[^\w]/g, '').toLowerCase() || 'buyback';
+  const col = b => `${b.short.replace(/[^\w]/g, '').toLowerCase() || 'buyback'}_isk`;
   const q = state.hq.trim().toLowerCase();
   const list = buildSessions(state.allEvents || []).filter(s => !q || [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q)));
-  const head = ['session_id', 'start_eve', 'end_eve', 'minutes', 'characters', 'systems', 'units', 'isk', 'isk_per_hour', ...(bbOn ? [`${short}_isk`] : [])];
+  const head = ['session_id', 'start_eve', 'end_eve', 'minutes', 'characters', 'systems', 'units', 'isk', 'isk_per_hour', ...bbs().map(col), ...(bbs().length > 1 ? ['best_split_isk'] : [])];
   const fmt = ms => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
   const lines = list.reverse().map(s => [s.id, fmt(s.start), s.active ? '' : fmt(s.end), Math.round(s.ms / 60e3), s.chars.map(charName).join('; '), s.systems.map(sysName).join('; '),
-    s.units, s.v.toFixed(2), s.ms > 0 ? (s.v / (s.ms / 3600e3)).toFixed(2) : '', ...(bbOn ? [s.bb.toFixed(2)] : [])]);
+    s.units, s.v.toFixed(2), s.ms > 0 ? (s.v / (s.ms / 3600e3)).toFixed(2) : '', ...s.bb.map(x => x.toFixed(2)), ...(bbs().length > 1 ? [s.best.toFixed(2)] : [])]);
   download(`miningledger-sessions-${evedate(Date.now())}.csv`, [head, ...lines]);
 }
 function download(name, rows) {
@@ -330,9 +356,9 @@ function viewDays() {
   const max = Math.max(1, ...days.map(d => d.v));
   let running = days.reduce((n, d) => n + d.v, 0);
   const body = days.map(d => { const line = `<tr><td><b>${d.d}</b></td><td class="bar"><i style="width:${(d.v / max * 100).toFixed(1)}%"></i></td>
-    <td class="r">${num(d.units)}</td><td class="r">${isk(d.v)}</td>${showBB() ? `<td class="r">${bbNote(d, { short: false })}</td>` : ''}<td class="r dim">${isk(running)}</td></tr>`; running -= d.v; return line; }).join('');
+    <td class="r">${num(d.units)}</td><td class="r">${isk(d.v)}</td>${bbTds(d)}<td class="r dim">${isk(running)}</td></tr>`; running -= d.v; return line; }).join('');
   return `${tiles()}<div class="toolbar">${rangePicker()}<span class="grow"></span><button id="csv">Export CSV</button></div>
-    ${days.length ? `<table class="grid days"><thead><tr><th>Day (EVE)</th><th></th><th class="r">Units</th><th class="r">ISK</th>${showBB() ? `<th class="r">${esc(cmp().short)}</th>` : ''}<th class="r">Cumulative</th></tr></thead><tbody>${body}</tbody></table>` : '<div class="empty"><p>No ice in this range.</p></div>'}
+    ${days.length ? `<table class="grid days"><thead><tr><th>Day (EVE)</th><th></th><th class="r">Units</th><th class="r">ISK</th>${bbHeads()}<th class="r">Cumulative</th></tr></thead><tbody>${body}</tbody></table>` : '<div class="empty"><p>No ice in this range.</p></div>'}
     ${priceLine()}`;
 }
 
@@ -345,7 +371,7 @@ function viewCharacters() {
     return `<tr><td>${portrait(c.character_id, 32)}</td>
       <td><b>${esc(c.name)}</b>${c.is_main ? ' <span class="tag">main</span>' : ''}${problem ? `<div class="err">${esc(c.last_error || 'Needs to log in again')} <a href="/auth/login?add=1">Log in again</a></div>` : ''}</td>
       <td class="dim">${c.last_poll ? `checked ${ago(c.last_poll)}` : 'first check pending'}</td>
-      <td class="r">${isk(t.v)}${showBB() ? `<div class="bb">${bbNote(t)}</div>` : ''}</td>
+      <td class="r">${isk(t.v)}${bbs().map((b, i) => `<div class="bb">${bbNote(t, i)}</div>`).join('')}</td>
       <td class="r">${c.is_main ? '' : `<button class="link" data-main="${c.character_id}">Make main</button> <button class="link bad" data-remove="${c.character_id}">Remove</button>`}</td></tr>`;
   }).join('');
   return `<div class="toolbar"><a class="btn primary" href="/auth/login?add=1">+ Add a character</a><span class="grow"></span><button id="pollNow">Check ESI now</button></div>
@@ -356,13 +382,26 @@ function viewCharacters() {
 }
 
 function viewSettings() {
-  const s = state.me.settings, c = s.compare;
+  const s = state.me.settings;
+  if (!state.draftBuybacks) state.draftBuybacks = s.buybacks.map(b => ({ ...b, accepted: [...b.accepted] }));
+  const draft = state.draftBuybacks, list = bbs();
   const rawOf = Object.fromEntries(Object.entries(ICE).map(([raw, t]) => [t.value, raw]));
   const priceRows = Object.entries(PRICED).map(([id, name]) => { const p = state.prices[id] || {}; const raw = rawOf[id];
-    const bb = c.enabled ? (accepted(raw) ? num(bbValue(raw, 1) ?? NaN) : '<span class="na">not accepted</span>') : '';
-    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? num(p.buy) : '—'}</td><td class="r">${p.sell != null ? num(p.sell) : '—'}</td><td class="r">${num(value(raw, 1) ?? NaN)}</td>${c.enabled ? `<td class="r">${bb}</td>` : ''}<td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+    const pays = list.map(b => accepted(b, raw) ? bbValue(b, raw, 1) : null);
+    const top = Math.max(0, ...pays.filter(x => x != null));
+    const cells = pays.map(x => `<td class="r">${x == null ? '<span class="na">not accepted</span>' : `<span class="${list.length > 1 && x === top ? 'top' : ''}">${num(x)}</span>`}</td>`).join('');
+    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? num(p.buy) : '—'}</td><td class="r">${p.sell != null ? num(p.sell) : '—'}</td><td class="r">${num(value(raw, 1))}</td>${cells}<td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
   const productRows = Object.entries(PRODUCTS).map(([id, name]) => { const p = state.prices[id] || {};
     return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? p.buy.toLocaleString('en-US') : '—'}</td><td class="r">${p.sell != null ? p.sell.toLocaleString('en-US') : '—'}</td><td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+  const bbForm = draft.map((b, i) => `<fieldset class="bbset" data-i="${i}">
+      <legend><label><input type="checkbox" name="bb_enabled"${b.enabled ? ' checked' : ''}> <b>${esc(b.name)}</b></label> <button type="button" class="link bad" data-bbrm="${i}">Remove</button></legend>
+      <label class="field">Name <input name="bb_name" value="${esc(b.name)}" maxlength="50" style="width:280px"> Short name <input name="bb_short" value="${esc(b.short)}" maxlength="8" style="width:80px"></label>
+      <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${b.percentage}"> % of refined value at
+        <select name="bb_basis">${BUYBACK_BASES.map(x => `<option${x === b.basis ? ' selected' : ''}>${x}</option>`).join('')}</select>, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${b.yield}"> %</label>
+      <div class="field">Accepts:</div>
+      <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${b.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
+      <label class="field notefield">Notes <textarea name="bb_note" rows="2" maxlength="500">${esc(b.note || '')}</textarea></label>
+    </fieldset>`).join('');
   return `<form id="settings" class="panel form">
       <h3>Ice value</h3>
       <label class="field">Price source <select name="price_source">${state.me.price_sources.map(p => `<option${p === s.price_source ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
@@ -371,18 +410,26 @@ function viewSettings() {
       <h3>Sessions</h3>
       <label class="field">New session after a gap of <input name="session_gap_minutes" type="number" min="15" max="240" step="5" value="${s.session_gap_minutes}"> minutes</label>
       <p class="hint">EVE updates mining ledgers in batches, so entries arrive roughly every ${POLL_MINUTES} to 20 minutes while you mine. A gap shorter than 20 minutes will split one session into several.</p>
-      <h3>Compare with a buyback</h3>
-      <label class="field"><input type="checkbox" name="bb_enabled"${c.enabled ? ' checked' : ''}> Show what a refining buyback would pay next to your own value</label>
-      <label class="field">Name <input name="bb_name" value="${esc(c.name)}" maxlength="40" style="width:220px"> Short name <input name="bb_short" value="${esc(c.short)}" maxlength="8" style="width:80px"></label>
-      <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${c.percentage}"> % of refined value at Jita buy, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${c.yield}"> %</label>
-      <div class="field">Accepts:</div>
-      <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${c.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
-      <p class="hint">Set up from a KarmaFleet quote on 2026-11-22: 70% of the refined value at Jita buy. In that quote, Dark Glitter, Glare Crust and Gelidus were not accepted. Krystallos wasn't in the quote, so it's switched off here as a guess. A ${c.yield}% refine yield matched their per-unit price to within about 0.5%. Azure Ice and Crystalline Icicle have no refine data here, so they always count as not accepted.</p>
-      <button class="primary" type="submit">Save</button>
+      <h3>Buybacks to compare</h3>
+      <p class="hint" style="margin-top:0">Each buyback pays a percentage of the ice's refined value: the ice products it reprocesses into, priced at Jita, after the refine yield. Ice a buyback doesn't take counts as 0 for it. With more than one switched on, "Best split" is what you'd get selling each ice type to whichever pays most. Azure Ice and Crystalline Icicle have no refine data here, so no buyback takes them.</p>
+      ${bbForm}
+      ${draft.length < 5 ? '<button type="button" id="bbadd">+ Add a buyback</button>' : ''}
+      <div><button class="primary" type="submit">Save</button></div>
     </form>
-    <div class="panel"><h3>Jita prices (ISK per unit)</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">You (${esc(s.price_source)} × ${s.percentage}%)</th>${c.enabled ? `<th class="r">${esc(c.short)}</th>` : ''}<th></th></tr></thead><tbody>${priceRows}</tbody></table>
+    <div class="panel"><h3>Jita prices and what each buyer pays (ISK per unit)</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">You (${esc(s.price_source)} × ${s.percentage}%)</th>${bbHeads()}<th></th></tr></thead><tbody>${priceRows}</tbody></table></div>
+    ${list.length > 1 ? '<p class="hint">Bold: the buyback paying most for that ice.</p>' : ''}
     <h3>Ice products</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th></th></tr></thead><tbody>${productRows}</tbody></table>
     <p class="hint">Highest buy and lowest sell order at Jita IV - Moon 4 - Caldari Navy Assembly Plant, refreshed hourly${state.pricesUpdated ? `, last ${ago(state.pricesUpdated)}` : ''}.</p></div>`;
+}
+
+/** Reads the buyback fieldsets back into the draft list (so Add/Remove keep unsaved edits). */
+function readBuybacks() {
+  return [...document.querySelectorAll('fieldset.bbset')].map(fs => {
+    const v = n => fs.querySelector(`[name=${n}]`);
+    return { enabled: v('bb_enabled').checked, name: v('bb_name').value, short: v('bb_short').value, percentage: Number(v('bb_pct').value),
+      basis: v('bb_basis').value, yield: Number(v('bb_yield').value), note: v('bb_note').value,
+      accepted: [...fs.querySelectorAll('[name=bb_acc]:checked')].map(x => Number(x.value)) };
+  });
 }
 
 function render() {
@@ -410,14 +457,14 @@ function showLoggedOut() {
 
 function exportCsv() {
   const s = state.me.settings;
-  const bbOn = showBB(), short = cmp().short.replace(/[^\w]/g, '').toLowerCase() || 'buyback';
+  const col = b => `${b.short.replace(/[^\w]/g, '').toLowerCase() || 'buyback'}_isk`;
   const ids = new Map();
   for (const ss of buildSessions(state.events)) for (const r of ss.rows) ids.set(r, ss.id);
-  const head = ['session_id', 'eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...(bbOn ? [`${short}_isk`] : []), 'time_known'];
+  const head = ['session_id', 'eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...bbs().map(col), 'time_known'];
   const lines = [...state.events].sort((a, b) => a.t - b.t).map(e => {
     const v = value(e.y, e.q), p = state.prices[ICE[e.y].value];
     const unit = p ? (s.price_source === 'Jita Sell' ? p.sell : p.buy) : '';
-    return [ids.get(e) || '', e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...(bbOn ? [accepted(e.y) ? (bbValue(e.y, e.q) ?? 0).toFixed(2) : 'not accepted'] : []), e.a ? 'day only' : 'yes'];
+    return [ids.get(e) || '', e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...bbs().map(b => accepted(b, e.y) ? (bbValue(b, e.y, e.q) ?? 0).toFixed(2) : 'not accepted'), e.a ? 'day only' : 'yes'];
   });
   download(`miningledger-${evedate(Date.now())}.csv`, [head, ...lines]);
 }
@@ -438,7 +485,13 @@ async function pollNow(quiet = false) {
 document.addEventListener('click', async e => {
   const t = e.target.closest('button, a');
   if (!t) return;
-  if (t.matches('#tabs button')) { state.tab = t.dataset.tab; render(); return; }
+  if (t.matches('#tabs button')) { state.tab = t.dataset.tab; state.draftBuybacks = null; render(); return; }
+  if (t.id === 'bbadd') { state.draftBuybacks = [...readBuybacks(), { ...BUYBACK_DEFAULTS, accepted: [] }]; render(); return; }
+  if (t.dataset.bbrm != null) {
+    const d = readBuybacks(); const b = d[+t.dataset.bbrm];
+    if (!confirm(`Remove ${b.name}? (Not saved until you press Save.)`)) return;
+    d.splice(+t.dataset.bbrm, 1); state.draftBuybacks = d; render(); return;
+  }
   if (t.dataset.go) { e.preventDefault(); state.tab = t.dataset.go; render(); return; }
   if (t.classList.contains('sess-head')) { const k = t.parentElement.dataset.key; state.open.has(k) ? state.open.delete(k) : state.open.add(k); render(); return; }
   if (t.id === 'csv') { exportCsv(); return; }
@@ -476,9 +529,9 @@ document.addEventListener('submit', async e => {
   try {
     const { settings } = await api('/api/settings', { method: 'PUT', body: JSON.stringify({
       price_source: f.get('price_source'), percentage: Number(f.get('percentage')), session_gap_minutes: Number(f.get('session_gap_minutes')),
-      compare: { enabled: f.get('bb_enabled') === 'on', name: f.get('bb_name'), short: f.get('bb_short'), percentage: Number(f.get('bb_pct')), yield: Number(f.get('bb_yield')), accepted: f.getAll('bb_acc').map(Number) },
+      buybacks: readBuybacks(),
     }) });
-    state.me.settings = settings; toast('Settings saved'); render();
+    state.me.settings = settings; state.draftBuybacks = null; toast('Settings saved'); render();
   } catch (err) { toast(err.message, true); }
 });
 
