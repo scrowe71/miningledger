@@ -155,3 +155,16 @@ fieldset.bbset legend label { display: flex; gap: 6px; align-items: center; }
 .tile i span, div.bb span { text-transform: none; font-size: inherit; letter-spacing: 0; color: inherit; }
 .cols .top::after { content: none; }
 .cols .top { color: var(--text); }
+
+.c-bb small, td.bbv small { display: block; font-size: 11px; color: var(--dim); font-weight: 400; }
+.sess-head:has(.c-bb small) { padding-top: 8px; padding-bottom: 8px; }
+.rates { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }
+.rates-head { width: 100%; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--dim); }
+.rc { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; min-width: 130px; display: flex; flex-direction: column; }
+.rc span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+.rc b { font-size: 18px; color: var(--ice); font-variant-numeric: tabular-nums; }
+.rc b small { font-size: 12px; color: var(--dim); font-weight: 400; margin-left: 1px; }
+.rc i { font-style: normal; font-size: 11px; color: var(--dim); }
+.rc:not(:nth-child(2)) b { color: var(--accent); }
+.grid.hist td.bbv { white-space: nowrap; }
+.rc.best b { color: var(--good); }
