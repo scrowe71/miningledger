@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES } from './ice.js';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -246,32 +246,33 @@ function viewSessions() {
   if (!sessions.length && !approx.length) {
     return `${tiles()}${toolbar}<div class="empty"><h3>No ice yet</h3><p>MiningLedger checks each character's mining ledger every ${POLL_MINUTES} minutes. Ice shows up here once EVE publishes it, usually 10 to 20 minutes after it's mined.</p></div>${priceLine()}`;
   }
-  const rows = sessions.map((s, i) => {
-    const key = String(s.first), open = state.open.has(key);
-    const rate = s.ms > 0 ? s.v / (s.ms / 3600e3) : null;
-    return `<div class="sess${s.active ? ' active' : ''}${open ? ' open' : ''}" data-key="${key}">
-      <button class="sess-head" aria-expanded="${open}">
-        <span class="when"><b class="sid">${s.id}</b> ${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)} <i>${dur(s.ms)}</i></span>
-        <span class="who">${s.chars.slice(0, 8).map(c => portrait(c, 22)).join('')}${s.chars.length > 8 ? `<i>+${s.chars.length - 8}</i>` : ''}</span>
-        <span class="where">${esc(s.systems.map(sysName).join(', '))}</span>
-        <span class="r units">${num(s.units)} u</span>
-        <span class="r rate">${isk(rate)}/hr</span>
-        <span class="r total">${isk(s.v)}${s.missing ? '*' : ''}</span>
-        ${showBB() ? `<span class="r bbcol">${bbNote(s, { short: false })}</span>` : ''}
+  const bb = showBB();
+  const who = ids => `${ids.slice(0, 6).map(c => portrait(c, 22)).join('')}${ids.length > 6 ? `<i>+${ids.length - 6}</i>` : ''}`;
+  // One row layout for sessions, earlier days and the column header, so everything lines up.
+  const row = ({ key, open, active, id, time, len, chars, systems, units, rate, sv, approx = false }) => `
+    <div class="sess${active ? ' active' : ''}${open ? ' open' : ''}" data-key="${key}">
+      <button class="sess-head cols${approx ? ' approx' : ''}" aria-expanded="${open}">
+        <span class="c-id">${id}</span><span class="c-time">${time}</span><span class="c-len">${len}</span>
+        <span class="c-who">${who(chars)}</span><span class="c-sys">${esc(systems.map(sysName).join(', '))}</span>
+        <span class="c-units">${num(units)}</span><span class="c-rate">${rate == null ? '' : isk(rate)}</span>
+        <span class="c-val">${isk(sv.v)}${sv.missing ? '*' : ''}</span>${bb ? `<span class="c-bb">${bbNote(sv, { short: false })}</span>` : ''}
       </button>
-      ${open ? `<div class="sess-body">${breakdown(s.rows)}</div>` : ''}
+      ${open ? `<div class="sess-body">${breakdown(sv.rows)}</div>` : ''}
     </div>`;
-  }).join('');
+  const rows = sessions.map(s => row({
+    key: String(s.first), open: state.open.has(String(s.first)), active: s.active,
+    id: `<b class="sid">${s.id}</b>`, time: `${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)}`, len: dur(s.ms),
+    chars: s.chars, systems: s.systems, units: s.units, rate: s.ms > 0 ? s.v / (s.ms / 3600e3) : null, sv: s,
+  })).join('');
+  const header = (first = 'Session ID', time = 'EVE time') => `<div class="cols colhead"><span class="c-id">${first}</span><span class="c-time">${time}</span><span class="c-len">Length</span><span class="c-who">Characters</span><span class="c-sys">Systems</span><span class="c-units">Units</span><span class="c-rate">ISK/hr</span><span class="c-val">Your value</span>${bb ? `<span class="c-bb">${esc(cmp().short)}</span>` : ''}</div>`;
   const approxDays = [...new Set(approx.map(e => e.d))].sort().reverse();
   const earlier = approx.length ? `<h3 class="sub">Before tracking started</h3>
     <p class="hint">Mining from the 30 days of history EVE had when each character was added. EVE only gives daily totals for these, so there's no session time or ISK/hr.</p>
-    ${approxDays.map(d => { const r = approx.filter(e => e.d === d); const sv = sumValue(r); const key = `a${d}`, open = state.open.has(key);
-      return `<div class="${showBB() ? 'with-bb ' : ''}sess${open ? ' open' : ''}" data-key="${key}"><button class="sess-head approx" aria-expanded="${open}"><span class="when"><b>${d}</b> <i>whole day</i></span>
-        <span class="who">${[...new Set(r.map(e => e.c))].map(c => portrait(c, 22)).join('')}</span><span class="where">${esc([...new Set(r.map(e => e.s))].map(sysName).join(', '))}</span>
-        <span class="r units">${num(r.reduce((n, e) => n + e.q, 0))} u</span><span class="r rate"></span><span class="r total">${isk(sv.v)}</span>${showBB() ? `<span class="r bbcol">${bbNote(sv, { short: false })}</span>` : ''}</button>
-        ${open ? `<div class="sess-body">${breakdown(r)}</div>` : ''}</div>`; }).join('')}` : '';
-  const head = showBB() ? `<div class="sess-cols"><span>Session</span><span></span><span>Systems</span><span class="r">Units</span><span class="r">ISK/hr</span><span class="r">Your value</span><span class="r">${esc(cmp().short)}</span></div>` : '';
-  return `${tiles()}${toolbar}${head}<div class="sessions${showBB() ? ' with-bb' : ''}">${rows || '<p class="hint">No timed sessions in this range yet.</p>'}</div>${earlier}${priceLine()}`;
+    ${header('Day', '')}<div class="sessions${bb ? ' with-bb' : ''}">${approxDays.map(d => { const r = approx.filter(e => e.d === d); const key = `a${d}`;
+      return row({ key, open: state.open.has(key), approx: true, id: `<b>${idDate(Date.parse(d + 'T12:00:00Z'))}</b>`, time: 'whole day', len: '',
+        chars: [...new Set(r.map(e => e.c))], systems: [...new Set(r.map(e => e.s))], units: r.reduce((n, e) => n + e.q, 0), rate: null, sv: { ...sumValue(r), rows: r } }); }).join('')}</div>` : '';
+  const head = header();
+  return `${tiles()}${toolbar}${head}<div class="sessions${bb ? ' with-bb' : ''}">${rows || '<p class="hint">No timed sessions in this range yet.</p>'}</div>${earlier}${priceLine()}`;
 }
 
 function viewHistory() {
