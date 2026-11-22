@@ -7,7 +7,7 @@ import { ensureSchema, getMeta, setMeta } from './db.js';
 import { scheduled, pollDue, refreshPrices } from './poll.js';
 import { verifyEveToken } from './jwt.js';
 import { encrypt, jwtExp, tokenRequest } from './tokens.js';
-import { DEFAULT_SETTINGS, DEFAULT_BUYBACKS, BUYBACK_DEFAULTS, BUYBACK_BASES, ICE, PRICED, PRODUCTS, PRICE_SOURCES, POLL_MINUTES } from '../public/ice.js';
+import { DEFAULT_SETTINGS, DEFAULT_BUYBACKS, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS, ICE, PRICED, PRODUCTS, PRICE_SOURCES, POLL_MINUTES } from '../public/ice.js';
 
 const SSO = 'https://login.eveonline.com/v2/oauth';
 const SCOPE = 'esi-industry.read_character_mining.v1';
@@ -37,7 +37,8 @@ const settingsOf = acc => {
     if (s.compare) s.buybacks[0] = { ...s.buybacks[0], ...s.compare };
   }
   delete s.compare;
-  s.buybacks = s.buybacks.map(b => ({ ...BUYBACK_DEFAULTS, ...b }));
+  // Saved before buybacks had a method: BWTF pays on the compressed ice price, everything else stays refined.
+  s.buybacks = s.buybacks.map(b => ({ ...BUYBACK_DEFAULTS, ...(b.method ? {} : { method: b.short === 'BWTF' ? 'compressed' : 'refined' }), ...b }));
   return s;
 };
 
@@ -206,6 +207,7 @@ async function api(req, env, path, fetchImpl) {
           enabled: !!c.enabled,
           name: String(c.name ?? '').trim().slice(0, 50) || 'Buyback',
           short: String(c.short ?? '').trim().slice(0, 8) || 'BB',
+          method: BUYBACK_METHODS[c.method] ? c.method : 'refined',
           percentage: Math.round(p * 10) / 10, yield: Math.round(y * 100) / 100,
           basis: BUYBACK_BASES.includes(c.basis) ? c.basis : 'Jita Buy',
           accepted: [...new Set((Array.isArray(c.accepted) ? c.accepted : []).map(Number).filter(id => ICE[id]))],

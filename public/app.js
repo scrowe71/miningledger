@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
-import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES } from './ice.js';
+import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS } from './ice.js';
 
-const APP_VERSION = '1.4.3';
+const APP_VERSION = '1.4.4';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -66,11 +66,17 @@ function refinedUnit(b, typeId) {
   }
   return v * b.yield / 100;
 }
-const accepted = (b, typeId) => b.accepted.includes(Number(typeId)) && !!MATERIALS[typeId];
+/** Price of one unit of the compressed form of an ice type (1:1), at the buyback's Jita price. */
+function compressedUnit(b, typeId) {
+  const p = state.prices[ICE[typeId]?.value];
+  const x = b.basis === 'Jita Sell' ? p?.sell : p?.buy;
+  return x ?? null;
+}
+const accepted = (b, typeId) => b.accepted.includes(Number(typeId)) && (b.method === 'compressed' ? !!ICE[typeId] : !!MATERIALS[typeId]);
 /** What a buyback pays for `units` of a raw ice type: 0 if it doesn't take it, null if prices are missing. */
 function bbValue(b, typeId, units) {
   if (!accepted(b, typeId)) return 0;
-  const u = refinedUnit(b, typeId);
+  const u = b.method === 'compressed' ? compressedUnit(b, typeId) : refinedUnit(b, typeId);
   return u == null ? null : units * u * b.percentage / 100;
 }
 /** Your value, each buyback's value, and "best": every entry sold to whichever buyback pays most for it. */
@@ -286,7 +292,8 @@ function tiles() {
 function priceLine() {
   const s = state.me.settings;
   const when = state.pricesUpdated ? ago(state.pricesUpdated) : 'not yet loaded';
-  const bb = showBB() ? ` Buybacks: ${bbs().map(b => `<b title="${esc(b.name)}">${esc(b.short)}</b> ${b.percentage}% of refined value at ${esc(b.basis)} (${b.yield}% yield)`).join(', ')}; ice a buyback doesn't take counts as 0 for it.` : '';
+  const how = b => b.method === 'compressed' ? `${b.percentage}% of the compressed ice price at ${esc(b.basis)}` : `${b.percentage}% of refined value at ${esc(b.basis)} (${b.yield}% yield)`;
+  const bb = showBB() ? ` Buybacks: ${bbs().map(b => `<b title="${esc(b.name)}">${esc(b.short)}</b> ${how(b)}`).join(', ')}; ice a buyback doesn't take counts as 0 for it.` : '';
   return `<p class="hint">Valued as compressed ice at <b>${esc(s.price_source)}</b> × <b>${s.percentage}%</b>, using today's price for every day (prices updated ${when}).${bb} <a href="#" data-go="settings">Change</a></p>`;
 }
 
@@ -446,10 +453,11 @@ function viewSettings() {
   const bbForm = draft.map((b, i) => `<fieldset class="bbset" data-i="${i}">
       <legend><label><input type="checkbox" name="bb_enabled"${b.enabled ? ' checked' : ''}> <b>${esc(b.name)}</b></label> <button type="button" class="link bad" data-bbrm="${i}">Remove</button></legend>
       <label class="field">Name <input name="bb_name" value="${esc(b.name)}" maxlength="50" style="width:280px"> Short name <input name="bb_short" value="${esc(b.short)}" maxlength="8" style="width:80px"></label>
-      <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${b.percentage}"> % of refined value at
-        <select name="bb_basis">${BUYBACK_BASES.map(x => `<option${x === b.basis ? ' selected' : ''}>${x}</option>`).join('')}</select>, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${b.yield}"> %</label>
+      <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${b.percentage}"> % of the
+        <select name="bb_method">${Object.entries(BUYBACK_METHODS).map(([k, v]) => `<option value="${k}"${k === b.method ? ' selected' : ''}>${v}</option>`).join('')}</select> at
+        <select name="bb_basis">${BUYBACK_BASES.map(x => `<option${x === b.basis ? ' selected' : ''}>${x}</option>`).join('')}</select><span class="yieldbox"${b.method === 'compressed' ? ' hidden' : ''}>, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${b.yield}"> %</span></label>
       <div class="field">Accepts:</div>
-      <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${b.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
+      <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${b.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] || b.method === 'compressed' ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
       <label class="field notefield">Notes <textarea name="bb_note" rows="2" maxlength="500">${esc(b.note || '')}</textarea></label>
     </fieldset>`).join('');
   return `<form id="settings" class="panel form">
@@ -461,7 +469,7 @@ function viewSettings() {
       <label class="field">New session after a gap of <input name="session_gap_minutes" type="number" min="15" max="240" step="5" value="${s.session_gap_minutes}"> minutes</label>
       <p class="hint">EVE updates mining ledgers in batches, so entries arrive roughly every ${POLL_MINUTES} to 20 minutes while you mine. A gap shorter than 20 minutes will split one session into several.</p>
       <h3>Buybacks to compare</h3>
-      <p class="hint" style="margin-top:0">Each buyback pays a percentage of the ice's refined value: the ice products it reprocesses into, priced at Jita, after the refine yield. Ice a buyback doesn't take counts as 0 for it. With more than one switched on, "Best split" is what you'd get selling each ice type to whichever pays most. Azure Ice and Crystalline Icicle have no refine data here, so no buyback takes them.</p>
+      <p class="hint" style="margin-top:0">A buyback pays a percentage of either the compressed ice's own Jita price, or the ice's refined value (the ice products it reprocesses into, priced at Jita, after the refine yield). Ice a buyback doesn't take counts as 0 for it. With more than one switched on, "Best split" is what you'd get selling each ice type to whichever pays most. Azure Ice and Crystalline Icicle have no refine data, so only compressed-price buybacks can take them.</p>
       ${bbForm}
       ${draft.length < 5 ? '<button type="button" id="bbadd">+ Add a buyback</button>' : ''}
       <div><button class="primary" type="submit">Save</button></div>
@@ -476,7 +484,7 @@ function viewSettings() {
 function readBuybacks() {
   return [...document.querySelectorAll('fieldset.bbset')].map(fs => {
     const v = n => fs.querySelector(`[name=${n}]`);
-    return { enabled: v('bb_enabled').checked, name: v('bb_name').value, short: v('bb_short').value, percentage: Number(v('bb_pct').value),
+    return { enabled: v('bb_enabled').checked, name: v('bb_name').value, short: v('bb_short').value, method: v('bb_method').value, percentage: Number(v('bb_pct').value),
       basis: v('bb_basis').value, yield: Number(v('bb_yield').value), note: v('bb_note').value,
       accepted: [...fs.querySelectorAll('[name=bb_acc]:checked')].map(x => Number(x.value)) };
   });
@@ -570,6 +578,7 @@ document.addEventListener('input', e => {
   const el = $('#hq'); el.focus(); el.setSelectionRange(pos, pos);
 });
 document.addEventListener('change', async e => {
+  if (e.target.name === 'bb_method') { state.draftBuybacks = readBuybacks(); render(); return; }
   if (e.target.id === 'range') { state.range = Number(e.target.value); await loadData().catch(err => toast(err.message, true)); render(); }
 });
 document.addEventListener('submit', async e => {
