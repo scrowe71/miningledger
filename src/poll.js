@@ -1,7 +1,7 @@
 // Background work, run by the Cloudflare schedule:
 //   every 10 minutes: read each character's ESI mining ledger and record any new ice
 //   every hour:       refresh Jita prices for compressed ice
-import { ICE, PRICED } from '../public/ice.js';
+import { ICE, PRICED, PRODUCTS } from '../public/ice.js';
 import { ensureSchema, getMeta, setMeta } from './db.js';
 import { accessToken } from './tokens.js';
 
@@ -93,7 +93,7 @@ export async function jitaPrice(typeId, fetchImpl = fetch) {
 export async function refreshPrices(env, fetchImpl = fetch) {
   const now = Date.now();
   const writes = [], errors = [];
-  for (const id of Object.keys(PRICED).map(Number)) {
+  for (const id of [...Object.keys(PRICED), ...Object.keys(PRODUCTS)].map(Number)) {
     try {
       const p = await jitaPrice(id, fetchImpl);
       writes.push(env.DB.prepare(`INSERT INTO prices (type_id, buy, sell, note, updated) VALUES (?, ?, ?, ?, ?)

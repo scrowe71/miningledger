@@ -25,5 +25,31 @@ export const PRICED = {
   28627: 'Azure Ice', 28628: 'Crystalline Icicle',
 };
 export const PRICE_SOURCES = ['Jita Buy', 'Jita Sell'];
+
+// Ice products, for valuing ice the way refining buybacks do.
+export const PRODUCTS = {
+  16272: 'Heavy Water', 16273: 'Liquid Ozone', 16275: 'Strontium Clathrates',
+  16274: 'Helium Isotopes', 17889: 'Hydrogen Isotopes', 17888: 'Nitrogen Isotopes', 17887: 'Oxygen Isotopes',
+};
+// Reprocessing output of one unit of ice (raw or compressed, same thing), before yield.
+const STD = (iso, n) => ({ 16272: 69, 16273: 35, 16275: 1, [iso]: n });
+const IV = iso => ({ 16272: 104, 16273: 55, 16275: 1, [iso]: 483 });
+export const MATERIALS = {
+  16264: STD(17887, 414), 17975: IV(17887),   // Blue Ice: oxygen
+  16262: STD(16274, 414), 17978: IV(16274),   // Clear Icicle: helium
+  16263: STD(17889, 414), 17977: IV(17889),   // Glacial Mass: hydrogen
+  16265: STD(17888, 414), 17976: IV(17888),   // White Glaze: nitrogen
+  16266: { 16272: 1381, 16273: 691, 16275: 35 },  // Glare Crust
+  16267: { 16272: 691, 16273: 1381, 16275: 69 },  // Dark Glitter
+  16268: { 16272: 345, 16273: 691, 16275: 104 },  // Gelidus
+  16269: { 16272: 173, 16273: 691, 16275: 173 },  // Krystallos
+  // Azure Ice and Crystalline Icicle: no published refine data here, so a buyback comparison treats them as not accepted.
+};
+// Buyback to compare against. From a KarmaFleet quote (2026-11-22): 70% of refined value at Jita buy;
+// Dark Glitter, Glare Crust and Gelidus were "not accepted". Krystallos is assumed the same (not seen in a quote).
+export const DEFAULT_COMPARE = {
+  enabled: true, name: 'KarmaFleet Buyback', short: 'KFBP', percentage: 70, yield: 90.6,
+  accepted: [16264, 17975, 16262, 17978, 16263, 17977, 16265, 17976],
+};
 export const DEFAULT_SETTINGS = { price_source: 'Jita Buy', percentage: 95, session_gap_minutes: 30 };
 export const POLL_MINUTES = 10;

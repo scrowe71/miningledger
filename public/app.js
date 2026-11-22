@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
-import { ICE, PRICED, POLL_MINUTES } from './ice.js';
+import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES } from './ice.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -20,7 +20,7 @@ function isk(n) {
   if (a >= 1e3) return `${(n / 1e3).toFixed(0)}k`;
   return n.toFixed(0);
 }
-const num = n => Math.round(n).toLocaleString('en-US');
+const num = n => n == null || !isFinite(n) ? '—' : Math.round(n).toLocaleString('en-US');
 const pad = n => String(n).padStart(2, '0');
 const evetime = ms => { const d = new Date(ms); return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`; };
 const evedate = ms => new Date(ms).toISOString().slice(0, 10);
@@ -50,10 +50,38 @@ function value(typeId, units) {
   const unit = s.price_source === 'Jita Sell' ? p.sell : p.buy;
   return unit == null ? null : units * unit * s.percentage / 100;
 }
+const cmp = () => state.me.settings.compare;
+/** Refined value of one unit of ice at Jita buy and the buyback's refine yield (before the buyback's percentage). */
+function refinedUnit(typeId) {
+  const mats = MATERIALS[typeId];
+  if (!mats) return null;
+  let v = 0;
+  for (const [id, n] of Object.entries(mats)) { const p = state.prices[id]?.buy; if (p == null) return null; v += n * p; }
+  return v * cmp().yield / 100;
+}
+const accepted = typeId => cmp().accepted.includes(Number(typeId)) && !!MATERIALS[typeId];
+/** What the comparison buyback would pay: 0 for ice it doesn't accept, null if prices are missing. */
+function bbValue(typeId, units) {
+  if (!accepted(typeId)) return 0;
+  const u = refinedUnit(typeId);
+  return u == null ? null : units * u * cmp().percentage / 100;
+}
 function sumValue(rows) {
-  let v = 0, missing = false;
-  for (const r of rows) { const x = value(r.y, r.q); if (x == null) missing = true; else v += x; }
-  return { v, missing };
+  let v = 0, bb = 0, missing = false, rejected = 0;
+  for (const r of rows) {
+    const x = value(r.y, r.q); if (x == null) missing = true; else v += x;
+    const b = bbValue(r.y, r.q); if (b != null) bb += b;
+    if (!accepted(r.y)) rejected += r.q;
+  }
+  return { v, bb, missing, rejected };
+}
+const showBB = () => cmp().enabled;
+/** "KFBP 52.1m (−12%)": the buyback figure and how it compares with your own value. */
+function bbNote(sv, { short = true } = {}) {
+  if (!showBB()) return '';
+  const d = sv.v > 0 ? (sv.bb - sv.v) / sv.v * 100 : null;
+  const diff = d == null ? '' : ` <span class="${d >= 0 ? 'up' : 'down'}">(${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(0)}%)</span>`;
+  return `${short ? esc(cmp().short) + ' ' : ''}${isk(sv.bb)}${diff}`;
 }
 
 // ---------------------------------------------------------------- api
@@ -128,10 +156,12 @@ function breakdown(rows) {
     const k = `${r.c}|${r.y}`;
     m.set(k, (m.get(k) || 0) + r.q);
   }
-  const lines = [...m].map(([k, q]) => { const [c, y] = k.split('|').map(Number); return { c, y, q, v: value(y, q) }; })
+  const lines = [...m].map(([k, q]) => { const [c, y] = k.split('|').map(Number); return { c, y, q, v: value(y, q), b: bbValue(y, q) }; })
     .sort((a, b) => charName(a.c).localeCompare(charName(b.c)) || (b.v ?? 0) - (a.v ?? 0));
-  return `<table class="grid"><thead><tr><th>Character</th><th>Ice</th><th class="r">Units</th><th class="r">ISK</th></tr></thead><tbody>${
-    lines.map(l => `<tr><td>${portrait(l.c, 20)} ${esc(charName(l.c))}</td><td>${typeIcon(l.y)} ${esc(ICE[l.y].name)}</td><td class="r">${num(l.q)}</td><td class="r">${isk(l.v)}</td></tr>`).join('')
+  const bb = showBB();
+  return `<table class="grid"><thead><tr><th>Character</th><th>Ice</th><th class="r">Units</th><th class="r">ISK</th>${bb ? `<th class="r">${esc(cmp().short)}</th>` : ''}</tr></thead><tbody>${
+    lines.map(l => `<tr><td>${portrait(l.c, 20)} ${esc(charName(l.c))}</td><td>${typeIcon(l.y)} ${esc(ICE[l.y].name)}</td><td class="r">${num(l.q)}</td><td class="r">${isk(l.v)}</td>${
+      bb ? `<td class="r">${accepted(l.y) ? isk(l.b) : '<span class="na">not accepted</span>'}</td>` : ''}</tr>`).join('')
   }</tbody></table>`;
 }
 
@@ -143,20 +173,23 @@ function tiles() {
   const t = sumValue(state.events.filter(e => e.d === today));
   const sess = buildSessions(state.events)[0];
   const rate = sess && sess.ms > 0 ? sess.v / (sess.ms / 3600e3) : null;
-  const tile = (label, v, sub = '') => `<div class="tile"><span>${label}</span><b>${isk(v)}</b>${sub ? `<i>${sub}</i>` : ''}</div>`;
+  const tile = (label, sv, sub = '') => `<div class="tile"><span>${label}</span><b>${isk(sv.v)}</b>${sub ? `<i>${sub}</i>` : ''}${showBB() ? `<i class="bb">${bbNote(sv)}</i>` : ''}</div>`;
+  const none = { v: 0, bb: 0 };
   return `<div class="tiles">
-    ${tile('Today (EVE time)', t.v)}
-    ${state.range === 0 || state.range >= 7 ? tile('Last 7 days', inRange(7).v) : ''}
-    ${state.range === 0 || state.range >= 30 ? tile('Last 30 days', inRange(30).v) : ''}
-    ${tile('All time', all.v, `${num(state.totals.reduce((n, r) => n + r.q, 0))} units`)}
-    ${tile(sess?.active ? 'This session' : 'Last session', sess?.v ?? 0, sess ? `${isk(rate)} ISK/hr · ${dur(sess.ms)}${sess.active ? ' · <em>active</em>' : ''}` : 'none yet')}
+    ${tile('Today (EVE time)', t)}
+    ${state.range === 0 || state.range >= 7 ? tile('Last 7 days', inRange(7)) : ''}
+    ${state.range === 0 || state.range >= 30 ? tile('Last 30 days', inRange(30)) : ''}
+    ${tile('All time', all, `${num(state.totals.reduce((n, r) => n + r.q, 0))} units`)}
+    ${tile(sess?.active ? 'This session' : 'Last session', sess ?? none, sess ? `${isk(rate)} ISK/hr · ${dur(sess.ms)}${sess.active ? ' · <em>active</em>' : ''}` : 'none yet')}
   </div>`;
 }
 
 function priceLine() {
   const s = state.me.settings;
   const when = state.pricesUpdated ? ago(state.pricesUpdated) : 'not yet loaded';
-  return `<p class="hint">Valued as compressed ice at <b>${esc(s.price_source)}</b> × <b>${s.percentage}%</b>, using today's price for every day (prices updated ${when}). <a href="#" data-go="settings">Change</a></p>`;
+  const c = s.compare;
+  const bb = c.enabled ? ` Compared with <b>${esc(c.name)}</b> (${esc(c.short)}): ${c.percentage}% of refined value at Jita buy, ${c.yield}% refine yield; ice it doesn't accept counts as 0.` : '';
+  return `<p class="hint">Valued as compressed ice at <b>${esc(s.price_source)}</b> × <b>${s.percentage}%</b>, using today's price for every day (prices updated ${when}).${bb} <a href="#" data-go="settings">Change</a></p>`;
 }
 
 function rangePicker() {
@@ -183,6 +216,7 @@ function viewSessions() {
         <span class="r units">${num(s.units)} u</span>
         <span class="r rate">${isk(rate)}/hr</span>
         <span class="r total">${isk(s.v)}${s.missing ? '*' : ''}</span>
+        ${showBB() ? `<span class="r bbcol">${bbNote(s, { short: false })}</span>` : ''}
       </button>
       ${open ? `<div class="sess-body">${breakdown(s.rows)}</div>` : ''}
     </div>`;
@@ -191,11 +225,12 @@ function viewSessions() {
   const earlier = approx.length ? `<h3 class="sub">Before tracking started</h3>
     <p class="hint">Mining from the 30 days of history EVE had when each character was added. EVE only gives daily totals for these, so there's no session time or ISK/hr.</p>
     ${approxDays.map(d => { const r = approx.filter(e => e.d === d); const sv = sumValue(r); const key = `a${d}`, open = state.open.has(key);
-      return `<div class="sess${open ? ' open' : ''}" data-key="${key}"><button class="sess-head approx" aria-expanded="${open}"><span class="when"><b>${d}</b> <i>whole day</i></span>
+      return `<div class="${showBB() ? 'with-bb ' : ''}sess${open ? ' open' : ''}" data-key="${key}"><button class="sess-head approx" aria-expanded="${open}"><span class="when"><b>${d}</b> <i>whole day</i></span>
         <span class="who">${[...new Set(r.map(e => e.c))].map(c => portrait(c, 22)).join('')}</span><span class="where">${esc([...new Set(r.map(e => e.s))].map(sysName).join(', '))}</span>
-        <span class="r units">${num(r.reduce((n, e) => n + e.q, 0))} u</span><span class="r rate"></span><span class="r total">${isk(sv.v)}</span></button>
+        <span class="r units">${num(r.reduce((n, e) => n + e.q, 0))} u</span><span class="r rate"></span><span class="r total">${isk(sv.v)}</span>${showBB() ? `<span class="r bbcol">${bbNote(sv, { short: false })}</span>` : ''}</button>
         ${open ? `<div class="sess-body">${breakdown(r)}</div>` : ''}</div>`; }).join('')}` : '';
-  return `${tiles()}${toolbar}<div class="sessions">${rows || '<p class="hint">No timed sessions in this range yet.</p>'}</div>${earlier}${priceLine()}`;
+  const head = showBB() ? `<div class="sess-cols"><span>Session</span><span></span><span>Systems</span><span class="r">Units</span><span class="r">ISK/hr</span><span class="r">Your value</span><span class="r">${esc(cmp().short)}</span></div>` : '';
+  return `${tiles()}${toolbar}${head}<div class="sessions${showBB() ? ' with-bb' : ''}">${rows || '<p class="hint">No timed sessions in this range yet.</p>'}</div>${earlier}${priceLine()}`;
 }
 
 function viewDays() {
@@ -205,9 +240,9 @@ function viewDays() {
   const max = Math.max(1, ...days.map(d => d.v));
   let running = days.reduce((n, d) => n + d.v, 0);
   const body = days.map(d => { const line = `<tr><td><b>${d.d}</b></td><td class="bar"><i style="width:${(d.v / max * 100).toFixed(1)}%"></i></td>
-    <td class="r">${num(d.units)}</td><td class="r">${isk(d.v)}</td><td class="r dim">${isk(running)}</td></tr>`; running -= d.v; return line; }).join('');
+    <td class="r">${num(d.units)}</td><td class="r">${isk(d.v)}</td>${showBB() ? `<td class="r">${bbNote(d, { short: false })}</td>` : ''}<td class="r dim">${isk(running)}</td></tr>`; running -= d.v; return line; }).join('');
   return `${tiles()}<div class="toolbar">${rangePicker()}<span class="grow"></span><button id="csv">Export CSV</button></div>
-    ${days.length ? `<table class="grid days"><thead><tr><th>Day (EVE)</th><th></th><th class="r">Units</th><th class="r">ISK</th><th class="r">Cumulative</th></tr></thead><tbody>${body}</tbody></table>` : '<div class="empty"><p>No ice in this range.</p></div>'}
+    ${days.length ? `<table class="grid days"><thead><tr><th>Day (EVE)</th><th></th><th class="r">Units</th><th class="r">ISK</th>${showBB() ? `<th class="r">${esc(cmp().short)}</th>` : ''}<th class="r">Cumulative</th></tr></thead><tbody>${body}</tbody></table>` : '<div class="empty"><p>No ice in this range.</p></div>'}
     ${priceLine()}`;
 }
 
@@ -220,7 +255,7 @@ function viewCharacters() {
     return `<tr><td>${portrait(c.character_id, 32)}</td>
       <td><b>${esc(c.name)}</b>${c.is_main ? ' <span class="tag">main</span>' : ''}${problem ? `<div class="err">${esc(c.last_error || 'Needs to log in again')} <a href="/auth/login?add=1">Log in again</a></div>` : ''}</td>
       <td class="dim">${c.last_poll ? `checked ${ago(c.last_poll)}` : 'first check pending'}</td>
-      <td class="r">${isk(t.v)}</td>
+      <td class="r">${isk(t.v)}${showBB() ? `<div class="bb">${bbNote(t)}</div>` : ''}</td>
       <td class="r">${c.is_main ? '' : `<button class="link" data-main="${c.character_id}">Make main</button> <button class="link bad" data-remove="${c.character_id}">Remove</button>`}</td></tr>`;
   }).join('');
   return `<div class="toolbar"><a class="btn primary" href="/auth/login?add=1">+ Add a character</a><span class="grow"></span><button id="pollNow">Check ESI now</button></div>
@@ -231,9 +266,13 @@ function viewCharacters() {
 }
 
 function viewSettings() {
-  const s = state.me.settings;
-  const priceRows = Object.entries(PRICED).map(([id, name]) => { const p = state.prices[id] || {};
-    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? num(p.buy) : '—'}</td><td class="r">${p.sell != null ? num(p.sell) : '—'}</td><td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+  const s = state.me.settings, c = s.compare;
+  const rawOf = Object.fromEntries(Object.entries(ICE).map(([raw, t]) => [t.value, raw]));
+  const priceRows = Object.entries(PRICED).map(([id, name]) => { const p = state.prices[id] || {}; const raw = rawOf[id];
+    const bb = c.enabled ? (accepted(raw) ? num(bbValue(raw, 1) ?? NaN) : '<span class="na">not accepted</span>') : '';
+    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? num(p.buy) : '—'}</td><td class="r">${p.sell != null ? num(p.sell) : '—'}</td><td class="r">${num(value(raw, 1) ?? NaN)}</td>${c.enabled ? `<td class="r">${bb}</td>` : ''}<td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+  const productRows = Object.entries(PRODUCTS).map(([id, name]) => { const p = state.prices[id] || {};
+    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? p.buy.toLocaleString('en-US') : '—'}</td><td class="r">${p.sell != null ? p.sell.toLocaleString('en-US') : '—'}</td><td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
   return `<form id="settings" class="panel form">
       <h3>Ice value</h3>
       <label class="field">Price source <select name="price_source">${state.me.price_sources.map(p => `<option${p === s.price_source ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></label>
@@ -242,9 +281,17 @@ function viewSettings() {
       <h3>Sessions</h3>
       <label class="field">New session after a gap of <input name="session_gap_minutes" type="number" min="15" max="240" step="5" value="${s.session_gap_minutes}"> minutes</label>
       <p class="hint">EVE updates mining ledgers in batches, so entries arrive roughly every ${POLL_MINUTES} to 20 minutes while you mine. A gap shorter than 20 minutes will split one session into several.</p>
+      <h3>Compare with a buyback</h3>
+      <label class="field"><input type="checkbox" name="bb_enabled"${c.enabled ? ' checked' : ''}> Show what a refining buyback would pay next to your own value</label>
+      <label class="field">Name <input name="bb_name" value="${esc(c.name)}" maxlength="40" style="width:220px"> Short name <input name="bb_short" value="${esc(c.short)}" maxlength="8" style="width:80px"></label>
+      <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${c.percentage}"> % of refined value at Jita buy, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${c.yield}"> %</label>
+      <div class="field">Accepts:</div>
+      <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${c.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
+      <p class="hint">Set up from a KarmaFleet quote on 2026-11-22: 70% of the refined value at Jita buy. In that quote, Dark Glitter, Glare Crust and Gelidus were not accepted. Krystallos wasn't in the quote, so it's switched off here as a guess. A ${c.yield}% refine yield matched their per-unit price to within about 0.5%. Azure Ice and Crystalline Icicle have no refine data here, so they always count as not accepted.</p>
       <button class="primary" type="submit">Save</button>
     </form>
-    <div class="panel"><h3>Jita prices (ISK per unit)</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th></th></tr></thead><tbody>${priceRows}</tbody></table>
+    <div class="panel"><h3>Jita prices (ISK per unit)</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">You (${esc(s.price_source)} × ${s.percentage}%)</th>${c.enabled ? `<th class="r">${esc(c.short)}</th>` : ''}<th></th></tr></thead><tbody>${priceRows}</tbody></table>
+    <h3>Ice products</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th></th></tr></thead><tbody>${productRows}</tbody></table>
     <p class="hint">Highest buy and lowest sell order at Jita IV - Moon 4 - Caldari Navy Assembly Plant, refreshed hourly${state.pricesUpdated ? `, last ${ago(state.pricesUpdated)}` : ''}.</p></div>`;
 }
 
@@ -273,11 +320,12 @@ function showLoggedOut() {
 
 function exportCsv() {
   const s = state.me.settings;
-  const head = ['eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', 'time_known'];
+  const bbOn = showBB(), short = cmp().short.replace(/[^\w]/g, '').toLowerCase() || 'buyback';
+  const head = ['eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...(bbOn ? [`${short}_isk`] : []), 'time_known'];
   const lines = [...state.events].sort((a, b) => a.t - b.t).map(e => {
     const v = value(e.y, e.q), p = state.prices[ICE[e.y].value];
     const unit = p ? (s.price_source === 'Jita Sell' ? p.sell : p.buy) : '';
-    return [e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), e.a ? 'day only' : 'yes'];
+    return [e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...(bbOn ? [accepted(e.y) ? (bbValue(e.y, e.q) ?? 0).toFixed(2) : 'not accepted'] : []), e.a ? 'day only' : 'yes'];
   });
   const csv = [head, ...lines].map(r => r.map(x => /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : x).join(',')).join('\n');
   const a = document.createElement('a');
@@ -326,7 +374,10 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const f = new FormData(e.target);
   try {
-    const { settings } = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ price_source: f.get('price_source'), percentage: Number(f.get('percentage')), session_gap_minutes: Number(f.get('session_gap_minutes')) }) });
+    const { settings } = await api('/api/settings', { method: 'PUT', body: JSON.stringify({
+      price_source: f.get('price_source'), percentage: Number(f.get('percentage')), session_gap_minutes: Number(f.get('session_gap_minutes')),
+      compare: { enabled: f.get('bb_enabled') === 'on', name: f.get('bb_name'), short: f.get('bb_short'), percentage: Number(f.get('bb_pct')), yield: Number(f.get('bb_yield')), accepted: f.getAll('bb_acc').map(Number) },
+    }) });
     state.me.settings = settings; toast('Settings saved'); render();
   } catch (err) { toast(err.message, true); }
 });
