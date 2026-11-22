@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES } from './ice.js';
 
-const APP_VERSION = '1.4.2';
+const APP_VERSION = '1.4.3';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -36,7 +36,9 @@ function ago(ms) {
   if (m < 48 * 60) return `${Math.round(m / 60)} h ago`;
   return `${Math.round(m / 1440)} days ago`;
 }
-const portrait = (id, size = 32) => `<img class="pt" src="https://images.evetech.net/characters/${id}/portrait?size=${size * 2}" width="${size}" height="${size}" alt="">`;
+// The EVE image server only serves 32, 64, 128, 256, 512 or 1024 px; ask for the next size up from 2× (sharp on hi-dpi screens).
+const imgSize = px => [32, 64, 128, 256, 512, 1024].find(n => n >= px * 2) || 1024;
+const portrait = (id, size = 32) => `<img class="pt" src="https://images.evetech.net/characters/${id}/portrait?size=${imgSize(size)}" width="${size}" height="${size}" alt="" loading="lazy">`;
 const typeIcon = id => `<img class="ti" src="https://images.evetech.net/types/${id}/icon?size=32" width="20" height="20" alt="">`;
 const charName = id => state.me?.characters.find(c => c.character_id === id)?.name ?? `#${id}`;
 const sysName = id => state.systems[id] ?? `System ${id}`;
