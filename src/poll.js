@@ -23,38 +23,65 @@ async function esi(path, fetchImpl, token) {
 /** Reads one character's ledger and stores what changed since last time. Returns the number of new ice entries. */
 export async function pollCharacter(env, row, fetchImpl = fetch, now = Date.now()) {
   const db = env.DB;
+  const id = row.character_id;
+  // Claim this check. If another check of the same character (the schedule, or "Check ESI now") got there
+  // first, last_poll has moved on and this one stops, so the same ice can't be recorded twice.
+  const claim = await db.prepare('UPDATE characters SET last_poll = ? WHERE character_id = ? AND last_poll = ?').bind(now, id, row.last_poll).run();
+  if (!claim.meta?.changes) return { id, skipped: true };
   try {
     const token = await accessToken(env, row, fetchImpl);
-    const first = await esi(`/characters/${row.character_id}/mining/?datasource=tranquility&page=1`, fetchImpl, token);
+    const first = await esi(`/characters/${id}/mining/?datasource=tranquility&page=1`, fetchImpl, token);
     let entries = first.data;
-    for (let p = 2; p <= Math.min(first.pages, 5); p++) entries = entries.concat((await esi(`/characters/${row.character_id}/mining/?datasource=tranquility&page=${p}`, fetchImpl, token)).data);
+    for (let p = 2; p <= Math.min(first.pages, 5); p++) entries = entries.concat((await esi(`/characters/${id}/mining/?datasource=tranquility&page=${p}`, fetchImpl, token)).data);
     const ice = entries.filter(e => ICE[e.type_id]);
+    const oldest = ice.reduce((m, e) => (e.date < m ? e.date : m), '9999');
 
-    const { results } = await db.prepare('SELECT date, solar_system_id, type_id, quantity FROM ledger_totals WHERE character_id = ?').bind(row.character_id).all();
-    const had = new Map(results.map(t => [`${t.date}|${t.solar_system_id}|${t.type_id}`, t.quantity]));
+    // What's already recorded for each day/system/ice, compared with EVE's running daily totals.
+    // New ice is the difference; anything recorded beyond EVE's total is a duplicate and gets trimmed.
+    const { results } = await db.prepare(`SELECT date, solar_system_id, type_id, SUM(quantity) AS q FROM mining_events
+      WHERE character_id = ? AND date >= ? GROUP BY date, solar_system_id, type_id`).bind(id, oldest).all();
+    const have = new Map(results.map(t => [`${t.date}|${t.solar_system_id}|${t.type_id}`, t.q]));
     const backfill = !row.last_poll; // first check: history from before tracking, time of day unknown
     const writes = [];
+    let added = 0, trimmed = 0;
     for (const e of ice) {
       const key = `${e.date}|${e.solar_system_id}|${e.type_id}`;
-      const delta = e.quantity - (had.get(key) ?? 0);
-      if (delta <= 0) continue;
+      const delta = e.quantity - (have.get(key) ?? 0);
       writes.push(db.prepare(`INSERT INTO ledger_totals (character_id, date, solar_system_id, type_id, quantity) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(character_id, date, solar_system_id, type_id) DO UPDATE SET quantity = excluded.quantity`)
-        .bind(row.character_id, e.date, e.solar_system_id, e.type_id, e.quantity));
-      const approx = backfill ? 1 : 0;
-      const at = backfill ? Math.min(now, Date.parse(`${e.date}T00:00:00Z`)) : now;
-      writes.push(db.prepare('INSERT INTO mining_events (character_id, at, date, solar_system_id, type_id, quantity, approx) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .bind(row.character_id, at, e.date, e.solar_system_id, e.type_id, delta, approx));
+        .bind(id, e.date, e.solar_system_id, e.type_id, e.quantity));
+      if (delta > 0) {
+        const at = backfill ? Math.min(now, Date.parse(`${e.date}T00:00:00Z`)) : now;
+        writes.push(db.prepare('INSERT INTO mining_events (character_id, at, date, solar_system_id, type_id, quantity, approx) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .bind(id, at, e.date, e.solar_system_id, e.type_id, delta, backfill ? 1 : 0));
+        added++;
+      } else if (delta < 0) {
+        writes.push(...await trimSurplus(db, id, e, -delta));
+        trimmed += -delta;
+      }
     }
-    writes.push(db.prepare('UPDATE characters SET last_poll = ?, last_error = NULL WHERE character_id = ?').bind(now, row.character_id));
-    writes.push(db.prepare('DELETE FROM ledger_totals WHERE character_id = ? AND date < ?').bind(row.character_id, dayStr(now - TOTALS_KEEP_DAYS * 86400e3)));
+    writes.push(db.prepare('UPDATE characters SET last_poll = ?, last_error = NULL WHERE character_id = ?').bind(now, id));
+    writes.push(db.prepare('DELETE FROM ledger_totals WHERE character_id = ? AND date < ?').bind(id, dayStr(now - TOTALS_KEEP_DAYS * 86400e3)));
     await db.batch(writes);
-    return { id: row.character_id, added: (writes.length - 2) / 2 };
+    return { id, added, ...(trimmed ? { trimmed } : {}) };
   } catch (e) {
     const msg = e.status === 403 ? 'EVE refused access to the mining ledger: log this character in again' : e.message;
-    await db.prepare('UPDATE characters SET last_poll = ?, last_error = ? WHERE character_id = ?').bind(now, msg, row.character_id).run();
-    return { id: row.character_id, error: msg };
+    await db.prepare('UPDATE characters SET last_error = ? WHERE character_id = ?').bind(msg, id).run();
+    return { id, error: msg };
   }
+}
+
+/** Statements removing `surplus` units from the newest entries for one day/system/ice (duplicates are the later ones). */
+async function trimSurplus(db, id, e, surplus) {
+  const { results } = await db.prepare('SELECT id, quantity FROM mining_events WHERE character_id = ? AND date = ? AND solar_system_id = ? AND type_id = ? ORDER BY id DESC')
+    .bind(id, e.date, e.solar_system_id, e.type_id).all();
+  const out = [];
+  for (const r of results) {
+    if (surplus <= 0) break;
+    if (r.quantity <= surplus) { out.push(db.prepare('DELETE FROM mining_events WHERE id = ?').bind(r.id)); surplus -= r.quantity; }
+    else { out.push(db.prepare('UPDATE mining_events SET quantity = ? WHERE id = ?').bind(r.quantity - surplus, r.id)); surplus = 0; }
+  }
+  return out;
 }
 
 /** Checks the characters that have waited longest (all accounts, or just one). */

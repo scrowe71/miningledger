@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES } from './ice.js';
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
@@ -165,6 +165,7 @@ async function loadData() {
   const [ev, tot, pr, times] = await Promise.all([api(`/api/events?from=${from}`), api('/api/totals'), api('/api/prices'), api('/api/session-times')]);
   state.events = ev; state.totals = tot; state.prices = pr.prices; state.pricesUpdated = pr.updated; state.times = times;
   state.allEvents = null; // History reloads everything next time it's shown
+  state.check = null;
   if (state.tab === 'history') await loadHistory();
   await loadSystems(ev.map(e => e.s));
   status('');
@@ -410,7 +411,22 @@ function viewCharacters() {
     <table class="grid chars"><thead><tr><th></th><th>Character</th><th>Ledger</th><th class="r">All-time ISK</th><th></th></tr></thead><tbody>${rows}</tbody></table>
     <p class="hint">Characters belong to one MiningLedger account only. A character already linked to someone else's account can't be added to yours, and logging in with any of your alts opens this account.
     To add an alt, use <b>Add a character</b> and pick it on the EVE login page (log out of EVE there first if it signs you straight back in as the same character).
-    Removing a character deletes its mining entries from MiningLedger.</p>`;
+    Removing a character deletes its mining entries from MiningLedger.</p>
+    ${ledgerCheck()}`;
+}
+
+/** EVE's daily ice totals per character next to what MiningLedger recorded (last 7 days), for checking against the game. */
+function ledgerCheck() {
+  if (!state.check) { api('/api/ledger-check').then(r => { state.check = r; if (state.tab === 'characters') render(); }).catch(e => toast(e.message, true)); return '<h3 class="sub">Ledger check</h3><p class="hint">Loading…</p>'; }
+  const rows = state.check.map(r => {
+    const ok = r.esi != null && r.esi === r.ours;
+    return `<tr><td>${r.d}</td><td>${portrait(r.c, 20)} ${esc(charName(r.c))}</td><td>${typeIcon(r.y)} ${esc(ICE[r.y]?.name ?? r.y)}</td>
+      <td class="r">${r.esi == null ? '—' : num(r.esi)}</td><td class="r">${num(r.ours)}</td><td class="r dim">${r.pre ? num(r.pre) : ''}</td>
+      <td>${ok ? '<span class="ok">matches</span>' : `<span class="na">${r.esi == null ? 'not in EVE ledger' : `off by ${num(r.ours - r.esi)}`}</span>`}</td></tr>`;
+  }).join('');
+  return `<h3 class="sub">Ledger check (last 7 days)</h3>
+    <p class="hint">EVE's own daily ice totals for each character, as last read from ESI, next to what MiningLedger has recorded. Compare the EVE column with your in-game mining ledger. "Before tracking" is the part loaded from history when the character was added (EVE gives day totals for that, with no times). Any mismatch is corrected at the character's next check.</p>
+    ${state.check.length ? `<div class="scroll"><table class="grid"><thead><tr><th>Day (EVE)</th><th>Character</th><th>Ice</th><th class="r">EVE ledger</th><th class="r">MiningLedger</th><th class="r">Before tracking</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="hint">No ice in the last 7 days.</p>'}`;
 }
 
 function viewSettings() {

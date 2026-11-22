@@ -164,6 +164,23 @@ async function api(req, env, path, fetchImpl) {
     return json(results.map(r => r.t));
   }
 
+  // EVE's own daily ice totals for each character (as last read from ESI) next to what MiningLedger has recorded,
+  // so the numbers can be checked against the in-game mining ledger.
+  if (path === '/api/ledger-check' && m === 'GET') {
+    const since = new Date(Date.now() - 7 * 86400e3).toISOString().slice(0, 10);
+    const [esiRows, ours] = await Promise.all([
+      db.prepare(`SELECT t.character_id AS c, t.date AS d, t.type_id AS y, SUM(t.quantity) AS q FROM ledger_totals t JOIN characters ch ON ch.character_id = t.character_id
+        WHERE ch.account_id = ? AND t.date >= ? GROUP BY t.character_id, t.date, t.type_id`).bind(acc.id, since).all(),
+      db.prepare(`SELECT e.character_id AS c, e.date AS d, e.type_id AS y, SUM(e.quantity) AS q, SUM(CASE WHEN e.approx = 1 THEN e.quantity ELSE 0 END) AS pre
+        FROM mining_events e JOIN characters ch ON ch.character_id = e.character_id WHERE ch.account_id = ? AND e.date >= ? GROUP BY e.character_id, e.date, e.type_id`).bind(acc.id, since).all(),
+    ]);
+    const key = r => `${r.c}|${r.d}|${r.y}`;
+    const map = new Map();
+    for (const r of esiRows.results) map.set(key(r), { c: r.c, d: r.d, y: r.y, esi: r.q, ours: 0, pre: 0 });
+    for (const r of ours.results) { const k = key(r); const x = map.get(k) || { c: r.c, d: r.d, y: r.y, esi: null, ours: 0, pre: 0 }; x.ours = r.q; x.pre = r.pre; map.set(k, x); }
+    return json([...map.values()].sort((a, b) => b.d.localeCompare(a.d) || a.c - b.c || a.y - b.y));
+  }
+
   // All-time units by character and ice type (cheap, so the all-time total never needs every entry).
   if (path === '/api/totals' && m === 'GET') {
     const { results } = await db.prepare(`SELECT e.character_id AS c, e.type_id AS y, SUM(e.quantity) AS q, MIN(e.date) AS first
