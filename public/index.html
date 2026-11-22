@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiningLedger: ice mining ISK across all your characters</title>
+  <meta name="description" content="Tracks ice mined by your EVE Online main and alts, valued as compressed ice at today's Jita price.">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Mining<b>Ledger</b> <span id="version" class="version"></span></a>
+    <div class="status" id="status" aria-live="polite"></div>
+    <span class="clock" title="EVE time (UTC)"><b id="evetime">--:--</b> EVE</span>
+    <span id="who"></span>
+  </header>
+  <div id="banner"></div>
+  <main class="wrap">
+    <nav class="tabs" id="tabs" hidden>
+      <button data-tab="sessions" class="on">Sessions</button>
+      <button data-tab="days">By day</button>
+      <button data-tab="characters">Characters</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <div id="view"></div>
+  </main>
+  <div id="toasts"></div>
+  <footer class="foot">Mining data from CCP's ESI; prices from the Jita market. EVE Online and the EVE logo are the registered trademarks of CCP hf. All rights are reserved worldwide. Not affiliated with CCP hf. · <a href="https://crankyape.space/">crankyape.space</a></footer>
+</body>
+</html>
