@@ -1,13 +1,13 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES } from './ice.js';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = { 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last year', 0: 'All time' };
 
 const state = {
-  me: null, prices: {}, pricesUpdated: null, events: [], totals: [], systems: {},
+  me: null, prices: {}, pricesUpdated: null, events: [], totals: [], systems: {}, times: [], allEvents: null, hq: '',
   tab: 'sessions', range: 30, open: new Set(),
 };
 
@@ -118,13 +118,53 @@ async function loadSystems(ids) {
 async function loadData() {
   status('Loading…', true);
   const from = state.range ? Date.now() - state.range * 86400e3 : 1;
-  const [ev, tot, pr] = await Promise.all([api(`/api/events?from=${from}`), api('/api/totals'), api('/api/prices')]);
-  state.events = ev; state.totals = tot; state.prices = pr.prices; state.pricesUpdated = pr.updated;
+  const [ev, tot, pr, times] = await Promise.all([api(`/api/events?from=${from}`), api('/api/totals'), api('/api/prices'), api('/api/session-times')]);
+  state.events = ev; state.totals = tot; state.prices = pr.prices; state.pricesUpdated = pr.updated; state.times = times;
+  state.allEvents = null; // History reloads everything next time it's shown
+  if (state.tab === 'history') await loadHistory();
   await loadSystems(ev.map(e => e.s));
   status('');
 }
 
+async function loadHistory() {
+  if (state.allEvents) return;
+  status('Loading history…', true);
+  state.allEvents = state.range === 0 ? state.events : await api('/api/events?from=1');
+  await loadSystems(state.allEvents.map(e => e.s));
+  status('');
+}
+
 // ---------------------------------------------------------------- sessions
+const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const idDate = ms => { const d = new Date(ms); return `${pad(d.getUTCDate())}${MON[d.getUTCMonth()]}${d.getUTCFullYear()}`; };
+/**
+ * Session IDs like 22NOV2026-S01: the EVE (UTC) date the session started, then its number that day.
+ * Worked out from every detection time on the account, so an ID doesn't depend on the date range being viewed.
+ */
+let idCache = { key: '', list: [] };
+function sessionIds() {
+  const gap = state.me.settings.session_gap_minutes * 60e3;
+  const key = `${gap}|${state.times.length}|${state.times[state.times.length - 1]}`;
+  if (idCache.key === key) return idCache.list;
+  const list = [];
+  for (const t of state.times) {
+    const cur = list[list.length - 1];
+    if (!cur || t - cur.last > gap) list.push({ first: t, last: t }); else cur.last = t;
+  }
+  const perDay = {};
+  for (const s of list) { const d = idDate(s.first - POLL_MINUTES * 60e3); perDay[d] = (perDay[d] || 0) + 1; s.id = `${d}-S${pad(perDay[d])}`; }
+  idCache = { key, list };
+  return list;
+}
+function idFor(first) {
+  const list = sessionIds();
+  let lo = 0, hi = list.length - 1;
+  while (lo <= hi) { // the session whose detections span this time
+    const mid = (lo + hi) >> 1;
+    if (first < list[mid].first) hi = mid - 1; else if (first > list[mid].last) lo = mid + 1; else return list[mid].id;
+  }
+  return `${idDate(first - POLL_MINUTES * 60e3)}-S??`; // brand new, not in the list yet
+}
 /** Groups timed entries from all characters into sessions split by gaps longer than the setting. */
 function buildSessions(events) {
   const gap = state.me.settings.session_gap_minutes * 60e3;
@@ -145,6 +185,7 @@ function buildSessions(events) {
     Object.assign(s, sumValue(s.rows));
     s.chars = [...new Set(s.rows.map(r => r.c))];
     s.systems = [...new Set(s.rows.map(r => r.s))];
+    s.id = idFor(s.first);
   }
   return out.reverse();
 }
@@ -210,7 +251,7 @@ function viewSessions() {
     const rate = s.ms > 0 ? s.v / (s.ms / 3600e3) : null;
     return `<div class="sess${s.active ? ' active' : ''}${open ? ' open' : ''}" data-key="${key}">
       <button class="sess-head" aria-expanded="${open}">
-        <span class="when"><b>${evedate(s.start)}</b> ${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)} <i>${dur(s.ms)}</i></span>
+        <span class="when"><b class="sid">${s.id}</b> ${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)} <i>${dur(s.ms)}</i></span>
         <span class="who">${s.chars.slice(0, 8).map(c => portrait(c, 22)).join('')}${s.chars.length > 8 ? `<i>+${s.chars.length - 8}</i>` : ''}</span>
         <span class="where">${esc(s.systems.map(sysName).join(', '))}</span>
         <span class="r units">${num(s.units)} u</span>
@@ -231,6 +272,54 @@ function viewSessions() {
         ${open ? `<div class="sess-body">${breakdown(r)}</div>` : ''}</div>`; }).join('')}` : '';
   const head = showBB() ? `<div class="sess-cols"><span>Session</span><span></span><span>Systems</span><span class="r">Units</span><span class="r">ISK/hr</span><span class="r">Your value</span><span class="r">${esc(cmp().short)}</span></div>` : '';
   return `${tiles()}${toolbar}${head}<div class="sessions${showBB() ? ' with-bb' : ''}">${rows || '<p class="hint">No timed sessions in this range yet.</p>'}</div>${earlier}${priceLine()}`;
+}
+
+function viewHistory() {
+  if (!state.allEvents) { loadHistory().then(render).catch(e => toast(e.message, true)); return '<div class="empty"><p>Loading every session…</p></div>'; }
+  const all = buildSessions(state.allEvents);
+  const q = state.hq.trim().toLowerCase();
+  const list = q ? all.filter(s => [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q))) : all;
+  const bb = showBB();
+  const hours = list.reduce((n, s) => n + s.ms, 0) / 3600e3;
+  const tot = { v: list.reduce((n, s) => n + s.v, 0), bb: list.reduce((n, s) => n + s.bb, 0) };
+  const rows = list.map(s => {
+    const open = state.open.has(`h${s.first}`), rate = s.ms > 0 ? s.v / (s.ms / 3600e3) : null;
+    return `<tr class="hrow${open ? ' open' : ''}${s.active ? ' active' : ''}" data-hkey="h${s.first}">
+      <td><b class="sid">${s.id}</b>${s.active ? ' <span class="live">active</span>' : ''}</td>
+      <td class="nowrap">${evetime(s.start)}–${s.active ? 'now' : evetime(s.end)}</td><td class="nowrap">${dur(s.ms)}</td>
+      <td class="who">${s.chars.slice(0, 6).map(c => portrait(c, 20)).join('')}${s.chars.length > 6 ? ` +${s.chars.length - 6}` : ''} <span class="dim">${s.chars.length}</span></td>
+      <td class="dim ell">${esc(s.systems.map(sysName).join(', '))}</td>
+      <td class="r">${num(s.units)}</td><td class="r dim">${isk(rate)}</td><td class="r val">${isk(s.v)}${s.missing ? '*' : ''}</td>
+      ${bb ? `<td class="r bbv">${bbNote(s, { short: false })}</td>` : ''}</tr>
+      ${open ? `<tr class="hbody"><td colspan="${bb ? 9 : 8}">${breakdown(s.rows)}</td></tr>` : ''}`;
+  }).join('');
+  return `<div class="toolbar"><input type="search" id="hq" placeholder="Search by session ID, date, character or system" value="${esc(state.hq)}"><span class="grow"></span><button id="hcsv">Export sessions CSV</button></div>
+    <div class="tiles">
+      <div class="tile"><span>Sessions</span><b>${list.length}</b><i>${hours.toFixed(1)} hours mining</i></div>
+      <div class="tile"><span>Total value</span><b>${isk(tot.v)}</b>${bb ? `<i class="bb">${bbNote(tot)}</i>` : ''}</div>
+      <div class="tile"><span>Average ISK/hr</span><b>${isk(hours ? tot.v / hours : null)}</b>${bb ? `<i class="bb">${esc(cmp().short)} ${isk(hours ? tot.bb / hours : null)}</i>` : ''}</div>
+    </div>
+    ${list.length ? `<div class="scroll"><table class="grid hist"><thead><tr><th>Session ID</th><th>EVE time</th><th>Length</th><th>Characters</th><th>Systems</th><th class="r">Units</th><th class="r">ISK/hr</th><th class="r">Your value</th>${bb ? `<th class="r">${esc(cmp().short)}</th>` : ''}</tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty"><p>${q ? 'No sessions match that search.' : 'No timed sessions yet.'}</p></div>`}
+    <p class="hint">Session IDs are the EVE (UTC) date a session started plus its number that day, e.g. 22NOV2026-S01. They're worked out from your mining entries, so they stay the same as long as the session gap setting (${state.me.settings.session_gap_minutes} min) isn't changed. Mining from before tracking started has no times, so it isn't in this list.</p>
+    ${priceLine()}`;
+}
+
+function exportSessionsCsv() {
+  const bbOn = showBB(), short = cmp().short.replace(/[^\w]/g, '').toLowerCase() || 'buyback';
+  const q = state.hq.trim().toLowerCase();
+  const list = buildSessions(state.allEvents || []).filter(s => !q || [s.id, evedate(s.start), ...s.chars.map(charName), ...s.systems.map(sysName)].some(x => String(x).toLowerCase().includes(q)));
+  const head = ['session_id', 'start_eve', 'end_eve', 'minutes', 'characters', 'systems', 'units', 'isk', 'isk_per_hour', ...(bbOn ? [`${short}_isk`] : [])];
+  const fmt = ms => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+  const lines = list.reverse().map(s => [s.id, fmt(s.start), s.active ? '' : fmt(s.end), Math.round(s.ms / 60e3), s.chars.map(charName).join('; '), s.systems.map(sysName).join('; '),
+    s.units, s.v.toFixed(2), s.ms > 0 ? (s.v / (s.ms / 3600e3)).toFixed(2) : '', ...(bbOn ? [s.bb.toFixed(2)] : [])]);
+  download(`miningledger-sessions-${evedate(Date.now())}.csv`, [head, ...lines]);
+}
+function download(name, rows) {
+  const csv = rows.map(r => r.map(x => /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : x).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
 }
 
 function viewDays() {
@@ -298,7 +387,7 @@ function viewSettings() {
 function render() {
   if (!state.me?.logged_in) return;
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
-  $('#view').innerHTML = { sessions: viewSessions, days: viewDays, characters: viewCharacters, settings: viewSettings }[state.tab]();
+  $('#view').innerHTML = { sessions: viewSessions, history: viewHistory, days: viewDays, characters: viewCharacters, settings: viewSettings }[state.tab]();
 }
 
 function renderWho() {
@@ -321,17 +410,15 @@ function showLoggedOut() {
 function exportCsv() {
   const s = state.me.settings;
   const bbOn = showBB(), short = cmp().short.replace(/[^\w]/g, '').toLowerCase() || 'buyback';
-  const head = ['eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...(bbOn ? [`${short}_isk`] : []), 'time_known'];
+  const ids = new Map();
+  for (const ss of buildSessions(state.events)) for (const r of ss.rows) ids.set(r, ss.id);
+  const head = ['session_id', 'eve_time', 'date', 'character', 'system', 'ice', 'units', 'valued_as', 'unit_price', 'isk', ...(bbOn ? [`${short}_isk`] : []), 'time_known'];
   const lines = [...state.events].sort((a, b) => a.t - b.t).map(e => {
     const v = value(e.y, e.q), p = state.prices[ICE[e.y].value];
     const unit = p ? (s.price_source === 'Jita Sell' ? p.sell : p.buy) : '';
-    return [e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...(bbOn ? [accepted(e.y) ? (bbValue(e.y, e.q) ?? 0).toFixed(2) : 'not accepted'] : []), e.a ? 'day only' : 'yes'];
+    return [ids.get(e) || '', e.a ? '' : new Date(e.t).toISOString().slice(0, 16).replace('T', ' '), e.d, charName(e.c), sysName(e.s), ICE[e.y].name, e.q, PRICED[ICE[e.y].value], unit ?? '', v == null ? '' : v.toFixed(2), ...(bbOn ? [accepted(e.y) ? (bbValue(e.y, e.q) ?? 0).toFixed(2) : 'not accepted'] : []), e.a ? 'day only' : 'yes'];
   });
-  const csv = [head, ...lines].map(r => r.map(x => /[",\n]/.test(String(x)) ? `"${String(x).replace(/"/g, '""')}"` : x).join(',')).join('\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-  a.download = `miningledger-${evedate(Date.now())}.csv`;
-  a.click(); URL.revokeObjectURL(a.href);
+  download(`miningledger-${evedate(Date.now())}.csv`, [head, ...lines]);
 }
 
 async function pollNow(quiet = false) {
@@ -354,6 +441,7 @@ document.addEventListener('click', async e => {
   if (t.dataset.go) { e.preventDefault(); state.tab = t.dataset.go; render(); return; }
   if (t.classList.contains('sess-head')) { const k = t.parentElement.dataset.key; state.open.has(k) ? state.open.delete(k) : state.open.add(k); render(); return; }
   if (t.id === 'csv') { exportCsv(); return; }
+  if (t.id === 'hcsv') { exportSessionsCsv(); return; }
   if (t.id === 'pollNow') { t.disabled = true; await pollNow(); return; }
   if (t.dataset.main) {
     await api(`/api/characters/${t.dataset.main}/main`, { method: 'POST' }).catch(err => toast(err.message, true));
@@ -365,6 +453,17 @@ document.addEventListener('click', async e => {
     try { await api(`/api/characters/${t.dataset.remove}`, { method: 'DELETE' }); toast(`${name} removed`); } catch (err) { toast(err.message, true); }
     state.me = await api('/api/me'); await loadData(); renderWho(); render();
   }
+});
+document.addEventListener('click', e => {
+  const row = e.target.closest('tr.hrow');
+  if (!row || e.target.closest('a, button')) return;
+  const k = row.dataset.hkey; state.open.has(k) ? state.open.delete(k) : state.open.add(k); render();
+});
+document.addEventListener('input', e => {
+  if (e.target.id !== 'hq') return;
+  state.hq = e.target.value;
+  const pos = e.target.selectionStart; render();
+  const el = $('#hq'); el.focus(); el.setSelectionRange(pos, pos);
 });
 document.addEventListener('change', async e => {
   if (e.target.id === 'range') { state.range = Number(e.target.value); await loadData().catch(err => toast(err.message, true)); render(); }

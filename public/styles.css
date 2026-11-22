@@ -117,3 +117,20 @@ table.grid { width: 100%; border-collapse: collapse; font-variant-numeric: tabul
   .tile b { font-size: 20px; }
 }
 .panel h3:first-child { margin-top: 4px; }
+
+.sid { font-variant-numeric: tabular-nums; letter-spacing: .3px; }
+.sess-head .sid { color: var(--text); }
+.live { font-size: 10px; color: var(--good); border: 1px solid var(--good); border-radius: 9px; padding: 0 6px; vertical-align: 1px; }
+input[type=search] { flex: 1; min-width: 200px; max-width: 420px; }
+.scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.grid.hist td { white-space: nowrap; }
+.grid.hist td.ell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.grid.hist td.who .pt { margin-right: -5px; border: 2px solid var(--panel); }
+.grid.hist td.who .dim { margin-left: 8px; font-size: 12px; }
+.grid.hist tr.hrow { cursor: pointer; }
+.grid.hist tr.hrow:hover td, .grid.hist tr.open td { background: var(--panel-2); }
+.grid.hist tr.active .sid { color: var(--good); }
+.grid.hist td.val { color: var(--ice); font-weight: 600; }
+.grid.hist td.bbv { color: var(--accent); }
+.grid.hist tr.hbody td { background: var(--bg); padding: 4px 12px 12px; white-space: normal; }
+.nowrap { white-space: nowrap; }

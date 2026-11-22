@@ -151,6 +151,13 @@ async function api(req, env, path, fetchImpl) {
     return json(results);
   }
 
+  // Every time new ice was seen (all time, timed entries only). Small, and enough to number every session.
+  if (path === '/api/session-times' && m === 'GET') {
+    const { results } = await db.prepare(`SELECT DISTINCT e.at AS t FROM mining_events e JOIN characters ch ON ch.character_id = e.character_id
+      WHERE ch.account_id = ? AND e.approx = 0 ORDER BY e.at`).bind(acc.id).all();
+    return json(results.map(r => r.t));
+  }
+
   // All-time units by character and ice type (cheap, so the all-time total never needs every entry).
   if (path === '/api/totals' && m === 'GET') {
     const { results } = await db.prepare(`SELECT e.character_id AS c, e.type_id AS y, SUM(e.quantity) AS q, MIN(e.date) AS first
