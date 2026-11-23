@@ -1,7 +1,7 @@
 // Background work, run by the Cloudflare schedule:
 //   every 10 minutes: read each character's ESI mining ledger and record any new ice
 //   every hour:       refresh Jita prices for compressed ice
-import { ICE, PRICED, PRODUCTS } from '../public/ice.js';
+import { ICE, PRICED, PRODUCTS, MARKETS } from '../public/ice.js';
 import { ensureSchema, getMeta, setMeta } from './db.js';
 import { accessToken } from './tokens.js';
 
@@ -126,6 +126,20 @@ export async function refreshPrices(env, fetchImpl = fetch) {
       writes.push(env.DB.prepare(`INSERT INTO prices (type_id, buy, sell, note, updated) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(type_id) DO UPDATE SET buy = excluded.buy, sell = excluded.sell, note = excluded.note, updated = excluded.updated`).bind(id, p.buy, p.sell, p.note, now));
     } catch (e) { errors.push(`${id}: ${e.message}`); }
+  }
+  // Ice products in the other markets (one request per product per market).
+  for (const [market, m] of Object.entries(MARKETS)) {
+    if (market === 'Jita') continue;
+    for (const id of Object.keys(PRODUCTS).map(Number)) {
+      try {
+        const { data } = await esi(`/markets/${m.region}/orders/?datasource=tranquility&order_type=all&type_id=${id}`, fetchImpl);
+        const here = data.filter(o => (m.location ? o.location_id === m.location : o.system_id === m.system));
+        const buys = here.filter(o => o.is_buy_order).map(o => o.price), sells = here.filter(o => !o.is_buy_order).map(o => o.price);
+        writes.push(env.DB.prepare(`INSERT INTO market_prices (market, type_id, buy, sell, orders, updated) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(market, type_id) DO UPDATE SET buy = excluded.buy, sell = excluded.sell, orders = excluded.orders, updated = excluded.updated`)
+          .bind(market, id, buys.length ? Math.max(...buys) : null, sells.length ? Math.min(...sells) : null, here.length, now));
+      } catch (e) { errors.push(`${market} ${id}: ${e.message}`); }
+    }
   }
   writes.push(setMeta(env.DB, 'prices_updated', now));
   await env.DB.batch(writes);

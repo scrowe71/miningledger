@@ -48,15 +48,22 @@ export const MATERIALS = {
 // Refining buybacks to compare against: each pays a percentage of the refined value of the ice
 // (ice products at Jita, after the refine yield). Ice a buyback doesn't take counts as 0 for it.
 // method: 'refined' = % of the ice products it refines into; 'compressed' = % of the compressed ice's own price.
-export const BUYBACK_DEFAULTS = { enabled: true, name: 'Buyback', short: 'BB', method: 'refined', percentage: 90, yield: 90.6, basis: 'Jita Buy', accepted: [], note: '' };
+// market: where the ice products (refined method) are priced. basis: 'Jita Buy' = buy orders, 'Jita Sell' = sell orders
+// (the names are kept from when Jita was the only market).
+export const BUYBACK_DEFAULTS = { enabled: true, name: 'Buyback', short: 'BB', method: 'refined', market: 'Jita', percentage: 90, yield: 90.6, basis: 'Jita Buy', accepted: [], note: '' };
+// Markets ice products can be priced in. Jita: Jita 4-4 first. Others: public orders in that one trade structure.
+export const MARKETS = {
+  Jita: { label: 'Jita', region: 10000002, system: 30000142 },
+  'C-J6MT': { label: 'C-J6MT', place: '1st Taj Mahgoon', region: 10000009, system: 30000772, location: 1049588174021 },
+};
 export const BUYBACK_METHODS = { refined: 'refined value (ice products)', compressed: 'compressed ice price' };
 export const DEFAULT_BUYBACKS = [
   { ...BUYBACK_DEFAULTS, name: 'KarmaFleet Buyback', short: 'KFBP', percentage: 70,
     accepted: [16264, 17975, 16262, 17978, 16263, 17977, 16265, 17976],
     note: 'From a KarmaFleet quote on 2026-11-22: 70% of refined value at Jita buy. Dark Glitter, Glare Crust and Gelidus were not accepted; Krystallos is assumed the same. A 90.6% yield matched their per-unit price to within about 0.5%.' },
-  { ...BUYBACK_DEFAULTS, name: 'Blackwater Task Forces Ice Buyback', short: 'BWTF', method: 'compressed', percentage: 92,
+  { ...BUYBACK_DEFAULTS, name: 'Blackwater Task Forces Ice Buyback', short: 'BWTF', method: 'refined', market: 'C-J6MT', percentage: 92,
     accepted: [16267, 16268, 16266, 16269, 17977],
-    note: 'Forum post (price fixed 10 Oct 2026): 92% of the compressed ice price for compressed Dark Glitter, Gelidus, Glare Crust, Krystallos and Glacial Mass IV-Grade. Contract to Skafan, 5 days minimum.' },
+    note: '92% of the reprocessed buy value at C-J6MT prices (forum post, price fixed 10 Oct 2026), for compressed Dark Glitter, Gelidus, Glare Crust, Krystallos and Glacial Mass IV-Grade. Contract to Skafan, 5 days minimum. Refine yield is a guess: check it against a BWTF quote.' },
 ];
 export const BUYBACK_BASES = ['Jita Buy', 'Jita Sell'];
 export const DEFAULT_SETTINGS = { price_source: 'Jita Buy', percentage: 95, session_gap_minutes: 30 };

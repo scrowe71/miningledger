@@ -7,7 +7,7 @@ import { ensureSchema, getMeta, setMeta } from './db.js';
 import { scheduled, pollDue, refreshPrices } from './poll.js';
 import { verifyEveToken } from './jwt.js';
 import { encrypt, jwtExp, tokenRequest } from './tokens.js';
-import { DEFAULT_SETTINGS, DEFAULT_BUYBACKS, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS, ICE, PRICED, PRODUCTS, PRICE_SOURCES, POLL_MINUTES } from '../public/ice.js';
+import { DEFAULT_SETTINGS, DEFAULT_BUYBACKS, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS, MARKETS, ICE, PRICED, PRODUCTS, PRICE_SOURCES, POLL_MINUTES } from '../public/ice.js';
 
 const SSO = 'https://login.eveonline.com/v2/oauth';
 const SCOPE = 'esi-industry.read_character_mining.v1';
@@ -38,7 +38,12 @@ const settingsOf = acc => {
   }
   delete s.compare;
   // Saved before buybacks had a method: BWTF pays on the compressed ice price, everything else stays refined.
-  s.buybacks = s.buybacks.map(b => ({ ...BUYBACK_DEFAULTS, ...(b.method ? {} : { method: b.short === 'BWTF' ? 'compressed' : 'refined' }), ...b }));
+  s.buybacks = s.buybacks.map(b => {
+    b = { ...b };
+    // BWTF went refined@Jita → compressed → refined at C-J6MT prices (v1.6): move saved copies along, keeping other edits.
+    if (b.short === 'BWTF' && !b.market) Object.assign(b, { method: 'refined', market: 'C-J6MT', note: DEFAULT_BUYBACKS[1].note });
+    return { ...BUYBACK_DEFAULTS, ...b };
+  });
   return s;
 };
 
@@ -128,12 +133,16 @@ async function api(req, env, path, fetchImpl) {
   if (path === '/api/prices' && m === 'GET') {
     // Fresh database (or new price types added): fetch prices now rather than waiting for the hourly schedule (at most every 2 minutes).
     const have = await db.prepare('SELECT COUNT(*) AS n FROM prices').first();
-    if (!(await getMeta(db, 'prices_updated')) || have.n < Object.keys(PRICED).length + Object.keys(PRODUCTS).length) {
+    const haveMk = await db.prepare('SELECT COUNT(*) AS n FROM market_prices').first();
+    if (!(await getMeta(db, 'prices_updated')) || have.n < Object.keys(PRICED).length + Object.keys(PRODUCTS).length || haveMk.n < (Object.keys(MARKETS).length - 1) * Object.keys(PRODUCTS).length) {
       const tried = Number(await getMeta(db, 'prices_try') || 0);
       if (Date.now() - tried > 2 * 60e3) { await setMeta(db, 'prices_try', Date.now()).run(); await refreshPrices(env, fetchImpl); }
     }
     const { results } = await db.prepare('SELECT type_id, buy, sell, note, updated FROM prices').all();
-    return json({ updated: Number(await getMeta(db, 'prices_updated')) || null, prices: Object.fromEntries(results.map(r => [r.type_id, r])) }, 200, { 'Cache-Control': 'public, max-age=300' });
+    const mk = await db.prepare('SELECT market, type_id, buy, sell, orders FROM market_prices').all();
+    const markets = {};
+    for (const r of mk.results) (markets[r.market] ??= {})[r.type_id] = r;
+    return json({ updated: Number(await getMeta(db, 'prices_updated')) || null, prices: Object.fromEntries(results.map(r => [r.type_id, r])), markets }, 200, { 'Cache-Control': 'public, max-age=300' });
   }
 
   const acc = await currentAccount(req, env);
@@ -208,6 +217,7 @@ async function api(req, env, path, fetchImpl) {
           name: String(c.name ?? '').trim().slice(0, 50) || 'Buyback',
           short: String(c.short ?? '').trim().slice(0, 8) || 'BB',
           method: BUYBACK_METHODS[c.method] ? c.method : 'refined',
+          market: MARKETS[c.market] ? c.market : 'Jita',
           percentage: Math.round(p * 10) / 10, yield: Math.round(y * 100) / 100,
           basis: BUYBACK_BASES.includes(c.basis) ? c.basis : 'Jita Buy',
           accepted: [...new Set((Array.isArray(c.accepted) ? c.accepted : []).map(Number).filter(id => ICE[id]))],

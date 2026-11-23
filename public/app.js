@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
-import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS } from './ice.js';
+import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS, MARKETS } from './ice.js';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = [['today', 'Today'], ['yesterday', 'Yesterday'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last year'], ['0', 'All time']];
@@ -67,14 +67,25 @@ function value(typeId, units) {
 // ---------------------------------------------------------------- buybacks
 const bbs = () => state.me.settings.buybacks.filter(b => b.enabled);
 const showBB = () => bbs().length > 0;
-/** Refined value of one unit of ice: ice products at the buyback's Jita price × its refine yield (before its percentage). */
+const sideOf = b => (b.basis === 'Jita Sell' ? 'sell' : 'buy');
+/** An ice product's price in the buyback's market; falls back to Jita when that market has no order for it. */
+function productPrice(b, id) {
+  const side = sideOf(b);
+  if (b.market && b.market !== 'Jita') {
+    const x = state.markets?.[b.market]?.[id]?.[side];
+    if (x != null) return { price: x, fallback: false };
+  }
+  const j = state.prices[id]?.[side];
+  return { price: j ?? null, fallback: !!(b.market && b.market !== 'Jita') };
+}
+/** Refined value of one unit of ice: ice products at the buyback's market price × its refine yield (before its percentage). */
 function refinedUnit(b, typeId) {
   const mats = MATERIALS[typeId];
   if (!mats) return null;
   let v = 0;
   for (const [id, n] of Object.entries(mats)) {
-    const p = state.prices[id]; const x = b.basis === 'Jita Sell' ? p?.sell : p?.buy;
-    if (x == null) return null; v += n * x;
+    const { price } = productPrice(b, id);
+    if (price == null) return null; v += n * price;
   }
   return v * b.yield / 100;
 }
@@ -183,7 +194,7 @@ async function loadData() {
   status('Loading…', true);
   const from = state.range === '0' ? 1 : Math.min(rangeBounds()[0], Date.now() - 31 * DAY);
   const [ev, tot, pr, times] = await Promise.all([api(`/api/events?from=${from}`), api('/api/totals'), api('/api/prices'), api('/api/session-times')]);
-  state.events = ev; state.totals = tot; state.prices = pr.prices; state.pricesUpdated = pr.updated; state.times = times;
+  state.events = ev; state.totals = tot; state.prices = pr.prices; state.markets = pr.markets || {}; state.pricesUpdated = pr.updated; state.times = times;
   state.allEvents = null; // History reloads everything next time it's shown
   state.check = null;
   if (state.tab === 'history') await loadHistory();
@@ -304,7 +315,7 @@ function tiles() {
 function priceLine() {
   const s = state.me.settings;
   const when = state.pricesUpdated ? ago(state.pricesUpdated) : 'not yet loaded';
-  const how = b => b.method === 'compressed' ? `${b.percentage}% of the compressed ice price at ${esc(b.basis)}` : `${b.percentage}% of refined value at ${esc(b.basis)} (${b.yield}% yield)`;
+  const how = b => b.method === 'compressed' ? `${b.percentage}% of the compressed ice price at Jita ${sideOf(b)}` : `${b.percentage}% of refined value at ${esc(MARKETS[b.market]?.label || 'Jita')} ${sideOf(b)} (${b.yield}% yield)`;
   const bb = showBB() ? ` Buybacks: ${bbs().map(b => `<b title="${esc(b.name)}">${esc(b.short)}</b> ${how(b)}`).join(', ')}; ice a buyback doesn't take counts as 0 for it.` : '';
   return `<p class="hint">Valued as compressed ice at <b>${esc(s.price_source)}</b> × <b>${s.percentage}%</b>, using today's price for every day (prices updated ${when}).${bb} <a href="#" data-go="settings">Change</a></p>`;
 }
@@ -464,14 +475,18 @@ function viewSettings() {
     const top = Math.max(0, ...pays.filter(x => x != null));
     const cells = pays.map(x => `<td class="r">${x == null ? '<span class="na">not accepted</span>' : `<span class="${list.length > 1 && x === top ? 'top' : ''}">${num(x)}</span>`}</td>`).join('');
     return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? num(p.buy) : '—'}</td><td class="r">${p.sell != null ? num(p.sell) : '—'}</td><td class="r">${num(value(raw, 1))}</td>${cells}<td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+  const others = Object.keys(MARKETS).filter(k => k !== 'Jita');
+  const fmtP = x => x != null ? x.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
   const productRows = Object.entries(PRODUCTS).map(([id, name]) => { const p = state.prices[id] || {};
-    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${p.buy != null ? p.buy.toLocaleString('en-US') : '—'}</td><td class="r">${p.sell != null ? p.sell.toLocaleString('en-US') : '—'}</td><td class="dim">${esc(p.note || '')}</td></tr>`; }).join('');
+    return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${fmtP(p.buy)}</td><td class="r">${fmtP(p.sell)}</td>${others.map(m => { const q = state.markets?.[m]?.[id] || {};
+      return `<td class="r">${q.buy != null ? fmtP(q.buy) : '<span class="na" title="No buy order there now: buybacks priced there use Jita">none</span>'}</td><td class="r dim">${fmtP(q.sell)}</td>`; }).join('')}</tr>`; }).join('');
   const bbForm = draft.map((b, i) => `<fieldset class="bbset" data-i="${i}">
       <legend><label><input type="checkbox" name="bb_enabled"${b.enabled ? ' checked' : ''}> <b>${esc(b.name)}</b></label> <button type="button" class="link bad" data-bbrm="${i}">Remove</button></legend>
       <label class="field">Name <input name="bb_name" value="${esc(b.name)}" maxlength="50" style="width:280px"> Short name <input name="bb_short" value="${esc(b.short)}" maxlength="8" style="width:80px"></label>
       <label class="field">Pays <input name="bb_pct" type="number" min="1" max="200" step="0.1" value="${b.percentage}"> % of the
         <select name="bb_method">${Object.entries(BUYBACK_METHODS).map(([k, v]) => `<option value="${k}"${k === b.method ? ' selected' : ''}>${v}</option>`).join('')}</select> at
-        <select name="bb_basis">${BUYBACK_BASES.map(x => `<option${x === b.basis ? ' selected' : ''}>${x}</option>`).join('')}</select><span class="yieldbox"${b.method === 'compressed' ? ' hidden' : ''}>, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${b.yield}"> %</span></label>
+        <select name="bb_market"${b.method === 'compressed' ? ' disabled title="Compressed ice is priced at Jita"' : ''}>${Object.entries(MARKETS).map(([k, m]) => `<option value="${k}"${k === (b.method === 'compressed' ? 'Jita' : b.market) ? ' selected' : ''}>${esc(m.label)}</option>`).join('')}</select>
+        <select name="bb_basis">${BUYBACK_BASES.map(x => `<option value="${x}"${x === b.basis ? ' selected' : ''}>${x === 'Jita Sell' ? 'sell' : 'buy'} prices</option>`).join('')}</select><span class="yieldbox"${b.method === 'compressed' ? ' hidden' : ''}>, refine yield <input name="bb_yield" type="number" min="50" max="100" step="0.1" value="${b.yield}"> %</span></label>
       <div class="field">Accepts:</div>
       <div class="accept">${Object.entries(ICE).map(([id, t]) => `<label><input type="checkbox" name="bb_acc" value="${id}"${b.accepted.includes(+id) ? ' checked' : ''}${MATERIALS[id] || b.method === 'compressed' ? '' : ' disabled'}> ${esc(t.name)}</label>`).join('')}</div>
       <label class="field notefield">Notes <textarea name="bb_note" rows="2" maxlength="500">${esc(b.note || '')}</textarea></label>
@@ -492,7 +507,8 @@ function viewSettings() {
     </form>
     <div class="panel"><h3>Jita prices and what each buyer pays (ISK per unit)</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">You (${esc(s.price_source)} × ${s.percentage}%)</th>${bbHeads()}<th></th></tr></thead><tbody>${priceRows}</tbody></table></div>
     ${list.length > 1 ? '<p class="hint">Bold: the buyback paying most for that ice.</p>' : ''}
-    <h3>Ice products</h3><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th></th></tr></thead><tbody>${productRows}</tbody></table>
+    <h3>Ice products</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Jita buy</th><th class="r">Jita sell</th>${others.map(m => `<th class="r">${esc(MARKETS[m].label)} buy</th><th class="r">${esc(MARKETS[m].label)} sell</th>`).join('')}</tr></thead><tbody>${productRows}</tbody></table></div>
+    <p class="hint">${others.map(m => `${esc(MARKETS[m].label)}: highest buy and lowest sell order at ${esc(MARKETS[m].label)} - ${esc(MARKETS[m].place || '')}`).join('; ')}. Where there's no order for a product, a buyback priced there uses the Jita price for it instead.</p>
     <p class="hint">Highest buy and lowest sell order at Jita IV - Moon 4 - Caldari Navy Assembly Plant, refreshed hourly${state.pricesUpdated ? `, last ${ago(state.pricesUpdated)}` : ''}.</p></div>`;
 }
 
@@ -501,7 +517,7 @@ function readBuybacks() {
   return [...document.querySelectorAll('fieldset.bbset')].map(fs => {
     const v = n => fs.querySelector(`[name=${n}]`);
     return { enabled: v('bb_enabled').checked, name: v('bb_name').value, short: v('bb_short').value, method: v('bb_method').value, percentage: Number(v('bb_pct').value),
-      basis: v('bb_basis').value, yield: Number(v('bb_yield').value), note: v('bb_note').value,
+      basis: v('bb_basis').value, market: v('bb_method').value === 'compressed' ? 'Jita' : v('bb_market').value, yield: Number(v('bb_yield').value), note: v('bb_note').value,
       accepted: [...fs.querySelectorAll('[name=bb_acc]:checked')].map(x => Number(x.value)) };
   });
 }

@@ -19,6 +19,8 @@ const SCHEMA = [
      solar_system_id INTEGER NOT NULL, type_id INTEGER NOT NULL, quantity INTEGER NOT NULL, approx INTEGER NOT NULL DEFAULT 0)`,
   `CREATE INDEX IF NOT EXISTS ix_events_char_at ON mining_events (character_id, at)`,
   `CREATE TABLE IF NOT EXISTS prices (type_id INTEGER PRIMARY KEY, buy REAL, sell REAL, note TEXT, updated INTEGER NOT NULL)`,
+  // Ice product prices in markets other than Jita (e.g. C-J6MT), for buybacks priced there.
+  `CREATE TABLE IF NOT EXISTS market_prices (market TEXT NOT NULL, type_id INTEGER NOT NULL, buy REAL, sell REAL, orders INTEGER, updated INTEGER NOT NULL, PRIMARY KEY (market, type_id))`,
   `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 ];
 let ready = null;
