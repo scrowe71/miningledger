@@ -61,10 +61,12 @@ export const DEFAULT_BUYBACKS = [
   { ...BUYBACK_DEFAULTS, name: 'KarmaFleet Buyback', short: 'KFBP', percentage: 70,
     accepted: [16264, 17975, 16262, 17978, 16263, 17977, 16265, 17976],
     note: 'From a KarmaFleet quote on 2026-11-22: 70% of refined value at Jita buy. Dark Glitter, Glare Crust and Gelidus were not accepted; Krystallos is assumed the same. A 90.6% yield matched their per-unit price to within about 0.5%.' },
-  { ...BUYBACK_DEFAULTS, name: 'Blackwater Task Forces Ice Buyback', short: 'BWTF', method: 'refined', market: 'C-J6MT', percentage: 92,
+  { ...BUYBACK_DEFAULTS, name: 'Blackwater Task Forces Ice Buyback', short: 'BWTF', method: 'refined', market: 'C-J6MT', percentage: 92, yield: 90.63,
     accepted: [16267, 16268, 16266, 16269, 17977],
-    note: '92% of the reprocessed buy value at C-J6MT prices (forum post, price fixed 10 Oct 2026), for compressed Dark Glitter, Gelidus, Glare Crust, Krystallos and Glacial Mass IV-Grade. Contract to Skafan, 5 days minimum. Refine yield is a guess: check it against a BWTF quote.' },
+    note: '92% of the reprocessed buy value at C-J6MT prices (forum post, price fixed 10 Oct 2026), for compressed Dark Glitter, Gelidus, Glare Crust, Krystallos and Glacial Mass IV-Grade. Contract to Skafan, 5 days minimum. Their appraisal tool (innomin.at) uses a 90.63% yield and also shows a 5% processing fee.' },
 ];
 export const BUYBACK_BASES = ['Jita Buy', 'Jita Sell'];
-export const DEFAULT_SETTINGS = { price_source: 'Jita Buy', percentage: 95, session_gap_minutes: 30 };
+// fallback_prices: per market, a price to use for an ice product when that market has no buy order for it.
+// Strontium at C-J6MT preset from an innomin.at appraisal (23 Nov 2026), which used 2,327 ISK there before its 92%.
+export const DEFAULT_SETTINGS = { price_source: 'Jita Buy', percentage: 95, session_gap_minutes: 30, fallback_prices: { 'C-J6MT': { 16275: 2327 } } };
 export const POLL_MINUTES = 10;

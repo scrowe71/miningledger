@@ -171,3 +171,5 @@ fieldset.bbset legend label { display: flex; gap: 6px; align-items: center; }
 .rates-head em { font-style: normal; text-transform: none; letter-spacing: 0; font-size: 12px; }
 sup { color: var(--accent); font-size: 10px; }
 .ok { font-size: 11px; color: var(--good); background: #15301f; border-radius: 9px; padding: 1px 7px; white-space: nowrap; }
+input.fbp { width: 90px; text-align: right; }
+.fbsave { margin-top: 8px; }

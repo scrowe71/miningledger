@@ -42,6 +42,8 @@ const settingsOf = acc => {
     b = { ...b };
     // BWTF went refined@Jita → compressed → refined at C-J6MT prices (v1.6): move saved copies along, keeping other edits.
     if (b.short === 'BWTF' && !b.market) Object.assign(b, { method: 'refined', market: 'C-J6MT', note: DEFAULT_BUYBACKS[1].note });
+    // innomin.at (BWTF's appraisal tool) uses 90.63%; move the earlier 90.6 guess and the old note along.
+    if (b.short === 'BWTF' && b.yield === 90.6) Object.assign(b, { yield: 90.63, note: DEFAULT_BUYBACKS[1].note });
     return { ...BUYBACK_DEFAULTS, ...b };
   });
   return s;
@@ -205,6 +207,19 @@ async function api(req, env, path, fetchImpl) {
     if (b.price_source !== undefined) { if (!PRICE_SOURCES.includes(b.price_source)) return fail(400, 'Unknown price source'); s.price_source = b.price_source; }
     if (b.percentage !== undefined) { const p = Number(b.percentage); if (!(p > 0 && p <= 200)) return fail(400, 'Percentage must be between 1 and 200'); s.percentage = Math.round(p * 10) / 10; }
     if (b.session_gap_minutes !== undefined) { const g = Number(b.session_gap_minutes); if (!(g >= 15 && g <= 240)) return fail(400, 'Session gap must be 15 to 240 minutes'); s.session_gap_minutes = Math.round(g); }
+    if (b.fallback_prices !== undefined) {
+      const out = {};
+      for (const [mk, list] of Object.entries(b.fallback_prices || {})) {
+        if (!MARKETS[mk] || mk === 'Jita') continue;
+        for (const [id, v] of Object.entries(list || {})) {
+          if (!PRODUCTS[id]) continue;
+          const x = Number(v);
+          if (v === null || v === '' || !(x > 0)) continue; // blank = use Jita
+          (out[mk] ??= {})[id] = Math.round(x * 100) / 100;
+        }
+      }
+      s.fallback_prices = out;
+    }
     if (b.buybacks !== undefined) {
       if (!Array.isArray(b.buybacks) || b.buybacks.length > 5) return fail(400, 'Up to 5 buybacks');
       const out = [];

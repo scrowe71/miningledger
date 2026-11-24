@@ -1,7 +1,7 @@
 // MiningLedger web app. All data comes from this site's own API, scoped to the logged-in account.
 import { ICE, PRICED, PRODUCTS, MATERIALS, POLL_MINUTES, BUYBACK_DEFAULTS, BUYBACK_BASES, BUYBACK_METHODS, MARKETS } from './ice.js';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.6.1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const RANGES = [['today', 'Today'], ['yesterday', 'Yesterday'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days'], ['365', 'Last year'], ['0', 'All time']];
@@ -74,6 +74,8 @@ function productPrice(b, id) {
   if (b.market && b.market !== 'Jita') {
     const x = state.markets?.[b.market]?.[id]?.[side];
     if (x != null) return { price: x, fallback: false };
+    const set = state.me.settings.fallback_prices?.[b.market]?.[id];
+    if (set > 0) return { price: set, fallback: 'set' };
   }
   const j = state.prices[id]?.[side];
   return { price: j ?? null, fallback: !!(b.market && b.market !== 'Jita') };
@@ -479,7 +481,9 @@ function viewSettings() {
   const fmtP = x => x != null ? x.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '—';
   const productRows = Object.entries(PRODUCTS).map(([id, name]) => { const p = state.prices[id] || {};
     return `<tr><td>${typeIcon(id)} ${esc(name)}</td><td class="r">${fmtP(p.buy)}</td><td class="r">${fmtP(p.sell)}</td>${others.map(m => { const q = state.markets?.[m]?.[id] || {};
-      return `<td class="r">${q.buy != null ? fmtP(q.buy) : '<span class="na" title="No buy order there now: buybacks priced there use Jita">none</span>'}</td><td class="r dim">${fmtP(q.sell)}</td>`; }).join('')}</tr>`; }).join('');
+      const fb = s.fallback_prices?.[m]?.[id];
+      return `<td class="r">${q.buy != null ? fmtP(q.buy) : '<span class="na" title="No buy order there now">none</span>'}</td><td class="r dim">${fmtP(q.sell)}</td>
+        <td class="r"><input class="fbp" type="number" min="0" step="0.01" name="fb_${m}_${id}" value="${fb ?? ''}" placeholder="Jita" title="Price to use when ${esc(MARKETS[m].label)} has no buy order for ${esc(name)} (blank = Jita price)"></td>`; }).join('')}</tr>`; }).join('');
   const bbForm = draft.map((b, i) => `<fieldset class="bbset" data-i="${i}">
       <legend><label><input type="checkbox" name="bb_enabled"${b.enabled ? ' checked' : ''}> <b>${esc(b.name)}</b></label> <button type="button" class="link bad" data-bbrm="${i}">Remove</button></legend>
       <label class="field">Name <input name="bb_name" value="${esc(b.name)}" maxlength="50" style="width:280px"> Short name <input name="bb_short" value="${esc(b.short)}" maxlength="8" style="width:80px"></label>
@@ -507,8 +511,9 @@ function viewSettings() {
     </form>
     <div class="panel"><h3>Jita prices and what each buyer pays (ISK per unit)</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">You (${esc(s.price_source)} × ${s.percentage}%)</th>${bbHeads()}<th></th></tr></thead><tbody>${priceRows}</tbody></table></div>
     ${list.length > 1 ? '<p class="hint">Bold: the buyback paying most for that ice.</p>' : ''}
-    <h3>Ice products</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Jita buy</th><th class="r">Jita sell</th>${others.map(m => `<th class="r">${esc(MARKETS[m].label)} buy</th><th class="r">${esc(MARKETS[m].label)} sell</th>`).join('')}</tr></thead><tbody>${productRows}</tbody></table></div>
-    <p class="hint">${others.map(m => `${esc(MARKETS[m].label)}: highest buy and lowest sell order at ${esc(MARKETS[m].label)} - ${esc(MARKETS[m].place || '')}`).join('; ')}. Where there's no order for a product, a buyback priced there uses the Jita price for it instead.</p>
+    <h3>Ice products</h3><div class="scroll-x"><table class="grid"><thead><tr><th>Type</th><th class="r">Jita buy</th><th class="r">Jita sell</th>${others.map(m => `<th class="r">${esc(MARKETS[m].label)} buy</th><th class="r">${esc(MARKETS[m].label)} sell</th><th class="r" title="Used when there's no buy order there">If none</th>`).join('')}</tr></thead><tbody>${productRows}</tbody></table></div>
+    <div class="fbsave"><button id="fbSave">Save "if none" prices</button></div>
+    <p class="hint">${others.map(m => `${esc(MARKETS[m].label)}: highest buy and lowest sell order at ${esc(MARKETS[m].label)} - ${esc(MARKETS[m].place || '')}`).join('; ')}. When there's no buy order for a product there, a buyback priced there uses your "If none" price for it, or the Jita price if that's blank. Strontium at C-J6MT starts at 2,327 ISK, the price BWTF's appraisal tool (innomin.at) used on 23 Nov 2026.</p>
     <p class="hint">Highest buy and lowest sell order at Jita IV - Moon 4 - Caldari Navy Assembly Plant, refreshed hourly${state.pricesUpdated ? `, last ${ago(state.pricesUpdated)}` : ''}.</p></div>`;
 }
 
@@ -586,6 +591,12 @@ document.addEventListener('click', async e => {
   if (t.classList.contains('sess-head')) { const k = t.parentElement.dataset.key; state.open.has(k) ? state.open.delete(k) : state.open.add(k); render(); return; }
   if (t.id === 'csv') { exportCsv(); return; }
   if (t.id === 'hcsv') { exportSessionsCsv(); return; }
+  if (t.id === 'fbSave') {
+    const fallback_prices = {};
+    document.querySelectorAll('input.fbp').forEach(i => { const [, mk, id] = i.name.split('_'); if (i.value !== '') (fallback_prices[mk] ??= {})[id] = Number(i.value); });
+    try { const { settings } = await api('/api/settings', { method: 'PUT', body: JSON.stringify({ fallback_prices }) }); state.me.settings = settings; toast('Prices saved'); render(); } catch (err) { toast(err.message, true); }
+    return;
+  }
   if (t.id === 'pollNow') { t.disabled = true; await pollNow(); return; }
   if (t.dataset.main) {
     await api(`/api/characters/${t.dataset.main}/main`, { method: 'POST' }).catch(err => toast(err.message, true));
